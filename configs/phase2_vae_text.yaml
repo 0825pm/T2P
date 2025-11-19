@@ -1,0 +1,75 @@
+name: RESHEARCH
+data:
+  src: gloss
+  trg: skels
+  files: files
+  train: /home/user/Projects/Data/PHOENIX-2014-T-release-v3/PHOENIX-2014-TC/phoenix_slt/phoenix14t.skels.train
+  dev: /home/user/Projects/Data/PHOENIX-2014-T-release-v3/PHOENIX-2014-TC/phoenix_slt/phoenix14t.skels.dev
+  test: /home/user/Projects/Data/PHOENIX-2014-T-release-v3/PHOENIX-2014-TC/phoenix_slt/phoenix14t.skels.test
+  max_sent_length: 300
+  skip_frames: 1
+  src_vocab: /home/user/Projects/research/HoT/dataset/src_vocab.txt
+  data_path: /home/user/Projects/Data/PHOENIX-2014-T-release-v3/PHOENIX-2014-TC/phoenix_slt/
+  root_path: /home/user/Projects/Data/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/
+  # vocab_file: /home/user/Projects/research/HoT/g2p_data/gloss_vocab.txt
+  vocab_file: /home/user/Projects/research/HoT/g2p_data/text_vocab.txt
+  dec: True
+  preprocess_13parts: True
+training:
+  vae: False
+  gpu: 0
+  # epoch: 100
+  epoch: 1000
+  batch_size: 32
+  workers: 32
+  # lr: 4e-5
+  # lr: 2e-4
+  lr: 0.001
+  # lr: 1e-5
+  lr_decay_large: 0.5
+  lr_decay_epoch: 200
+  lr_decay: 0.99
+  lr_noise_pct: 0.67
+  lr_noise_std: 1.0
+  warmup_epochs: 0
+  warmup_lr: 1e-6
+  cooldow_eopochs: 10
+  patience_epochs: 10
+  min_lr: 1.0e-08
+  decay_epochs: 30
+  decay_rate: 0.1  
+  sched: cosine
+  wandb: disabled # online or disabled
+  scale_embedding: False
+  random_mask: 0.4
+logging:
+  chcekpoint: 'checkpoint/'
+  previous_dir: '/home/user/Projects/research/HoT/checkpoint/1_blip_stage1'
+model:
+  trg_size: 150
+  n_joints: 50
+  out_joints: 50
+  embed_dim: 512
+  # mlp_hidden_dim: 1536
+  mlp_hidden_dim: 512
+  out_dim: 3
+  layer_index: 3
+  max_len: 300
+  token_num: 8
+  cross_attention_freq: 2
+  depth: 1
+  codebook_size: 512
+  drop_path_rate: 0.1
+  drop_rate: 0.1
+  attn_drop_rate: 0.
+  qkv_bias: True
+  qk_scale: #None
+  num_heads: 8
+  device: 'cuda'
+  num_quantizers: 6
+  use_vq: True
+
+  tokenizer: /homedata/bjzhou/codes/VLP/GFSLT-VLP/pretrain_models/MBart_trimmed
+  transformer:  /homedata/bjzhou/codes/VLP/GFSLT-VLP/pretrain_models/MBart_trimmed
+  visual_encoder: /homedata/bjzhou/codes/VLP/GFSLT-VLP/pretrain_models/mytran
+  sign_proj: True
