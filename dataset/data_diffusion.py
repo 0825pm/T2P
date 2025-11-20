@@ -49,6 +49,7 @@ def load_data(cfg: dict) -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vo
 
     # Files field is just a raw text field
     files_field = data.RawField()
+    text_field = data.RawField()
 
     def tokenize_features(features):
         features= np.array(features).astype(float)
@@ -91,7 +92,7 @@ def load_data(cfg: dict) -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vo
     # Create the Training Data, using the SignProdDataset
     train_data = SignProdDataset(path=train_path,
                                  exts=("." + src_lang, "." + trg_lang, "." + files_lang, "." + cond_lang, "." + latent_lang),
-                                 fields=(src_field, reg_trg_field, files_field, reg_cond_field, reg_latent_field),
+                                 fields=(src_field, reg_trg_field, files_field, reg_cond_field, reg_latent_field, text_field),
                                  trg_size=trg_size,
                                  cond_size=cond_size,
                                  latent_size=latent_size,
@@ -119,7 +120,7 @@ def load_data(cfg: dict) -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vo
                                trg_size=trg_size,
                                cond_size=cond_size,
                                latent_size=latent_size,
-                               fields=(src_field, reg_trg_field, files_field, reg_cond_field, reg_latent_field),
+                               fields=(src_field, reg_trg_field, files_field, reg_cond_field, reg_latent_field, text_field),
                                skip_frames=skip_frames)
 
     # Create the Testing Data
@@ -129,7 +130,7 @@ def load_data(cfg: dict) -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vo
         trg_size=trg_size,
         cond_size=cond_size,
         latent_size=latent_size,
-        fields=(src_field, reg_trg_field, files_field, reg_cond_field, reg_latent_field),
+        fields=(src_field, reg_trg_field, files_field, reg_cond_field, reg_latent_field, text_field),
         skip_frames=skip_frames)
 
     src_field.vocab = src_vocab
@@ -205,7 +206,7 @@ class SignProdDataset(data.Dataset):
         """
 
         if not isinstance(fields[0], (tuple, list)):
-            fields = [('src', fields[0]), ('trg', fields[1]), ('file_paths', fields[2]), ('cond', fields[3]), ('latent', fields[4])]
+            fields = [('src', fields[0]), ('trg', fields[1]), ('file_paths', fields[2]), ('cond', fields[3]), ('latent', fields[4]), ('text', fields[5])]
 
         src_path, trg_path, file_path, cond_path, latent_path = tuple(os.path.expanduser(path + x) for x in exts)
 
@@ -242,6 +243,6 @@ class SignProdDataset(data.Dataset):
                 # Create a dataset examples out of the Source, Target Frames and FilesPath
                 if src_line != '' and trg_line != '' and cond_line != '' and latent_line != '':
                     examples.append(data.Example.fromlist(
-                        [src_line, trg_frames, files_line, cond_vectors, latent_vectors], fields))
+                        [src_line, trg_frames, files_line, cond_vectors, latent_vectors, src_line], fields))
 
         super(SignProdDataset, self).__init__(examples, fields, **kwargs)

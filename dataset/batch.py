@@ -13,7 +13,9 @@ class Batch:
         self.trg_mask = None
         self.trg_lengths = None
         self.ntokens = None
-
+        self.latent = None
+        self.cond = None
+        self.text = None
         self.file_paths = torch_batch.file_paths
         self.use_cuda = model.use_cuda
         self.target_pad = TARGET_PAD
@@ -37,6 +39,15 @@ class Batch:
             # Create the target mask the same size as target input
             self.trg_mask = (F.pad(input=trg_mask.double(), pad=(pad_amount, 0, 0, 0), mode='replicate') == 1.0)
             self.ntokens = (self.trg != pad_index).data.sum().item()
+            
+        if hasattr(torch_batch, "latent"):
+            self.latent = torch_batch.latent.clone()
+            
+        if hasattr(torch_batch, "cond"):
+            self.cond = torch_batch.cond.clone()
+            
+        if hasattr(torch_batch, "text"):
+            self.text = torch_batch.text
 
         if self.use_cuda:
             self._make_cuda()
@@ -55,3 +66,9 @@ class Batch:
             self.trg_input = self.trg_input.cuda()
             self.trg = self.trg.cuda()
             self.trg_mask = self.trg_mask.cuda()
+            
+        if self.latent is not None:
+            self.latent = self.latent.cuda()
+            
+        if self.cond is not None:
+            self.cond = self.cond.cuda()

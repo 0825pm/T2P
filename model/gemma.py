@@ -83,7 +83,7 @@ class GEMMA(nn.Module):
 
         # 2. Context Vector 생성 (Non-padding 토큰에 대한 평균 풀링)
         # (B, H_gemma) 벡터를 얻고, 이를 AR 시퀀스의 첫 번째 토큰으로 사용합니다.
-        text_emb = (last_hidden_state * attention_mask.unsqueeze(-1)).sum(dim=1) / attention_mask.sum(dim=1).clamp(min=1e-5)
+        text_emb = (last_hidden_state * attention_mask.unsqueeze(-1)).sum(dim=1) / attention_mask.sum(dim=1).unsqueeze(-1).clamp(min=1e-5)
         
         # Context Vector를 AR 시퀀스의 첫 번째 토큰으로 사용하기 위해 차원을 확장
         # (B, H_gemma) -> (B, 1, H_gemma)

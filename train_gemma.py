@@ -59,12 +59,13 @@ def save_videos(config, dataloader, model, epoch, checkpoint_dir, src_vocab, num
     pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
     pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
     
-    text_input = [" ".join([src_vocab.itos[batch.src[i][j]] for j in range(len(batch.src[i])-1)]) for i in range(len(batch.src))]
+    qae_feat = batch.latent
+    text_input = batch.text
     
     num_samples = min(num_samples, pose_input.shape[0])
     print(f"Saving {num_samples} seq2seq sampling videos...")
     
-    pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length)
+    pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, qae_feat)
     
     for i in range(num_samples):
         gt_len_i = pose_length[i].item()
@@ -114,7 +115,7 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
         pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
         qae_feat = batch.latent
-        text_input = [" ".join([src_vocab.itos[batch.src[i][j]] for j in range(len(batch.src[i])-1)]) for i in range(len(batch.src))]
+        text_input = batch.text
         
         pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, qae_feat)
         total_loss = recon_loss + latent_loss
@@ -149,6 +150,7 @@ def test(config, dataloader, model, src_vocab):
     
     loss_all = {"total_loss": AccumLoss(),
                 "recon_loss": AccumLoss(),
+                "latent_loss": AccumLoss(),
                 }
     
     all_dtw_pose = list()
@@ -165,11 +167,11 @@ def test(config, dataloader, model, src_vocab):
         pose_input = rearrange(pose_input, "b f (n c) -> b f n c", c=3)
         pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
         pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
+        qae_feat = batch.latent
+        text_input = batch.text
         
-        text_input = [" ".join([src_vocab.itos[batch.src[i][j]] for j in range(len(batch.src[i])-1)]) for i in range(len(batch.src))]
-        
-        pose_output, recon_loss = model(pose_input, text_input, pose_length)
-        total_loss = recon_loss
+        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, qae_feat)
+        total_loss = recon_loss + latent_loss
         
         pose_output = pose_output.to(torch.float32) * pose_mask
         joint_error_pose = torch.mean(torch.norm(pose_output - pose_input, dim=len(pose_input.shape)-1))
@@ -181,9 +183,11 @@ def test(config, dataloader, model, src_vocab):
         N = pose_input.shape[0]
         loss_all["total_loss"].update(total_loss.detach().cpu().numpy() * N, N)
         loss_all["recon_loss"].update(recon_loss.detach().cpu().numpy() * N, N)
+        loss_all["latent_loss"].update(latent_loss.detach().cpu().numpy() * N, N)
         
     return loss_all["total_loss"].avg, \
             loss_all["recon_loss"].avg, \
+            loss_all["latent_loss"].avg, \
             np.mean(np.array(all_mpjpe_pose)) * 1000, np.mean(all_dtw_pose)
             
 if __name__ == "__main__":
@@ -216,18 +220,8 @@ if __name__ == "__main__":
     
     model = GEMMA(model_config).cuda()
     
-    # clip_grad_fun = build_gradient_clipper(config=train_config)
-    # optimizer = build_optimizer(config=train_config, parameters=model.parameters())
     clip_grad_fun = None
- 
-    minimize_metric = True
-    # scheduler, scheduler_step_at = build_scheduler(
-    #         config=train_config,
-    #         scheduler_mode="min" if minimize_metric else "max",
-    #         optimizer=optimizer,
-    #         hidden_size=model_config["hidden_size"])
-    
-    
+
     param_groups = [
         {"params": model.parameters(), "lr": lr, "weight_decay": 0.01},]
     
@@ -251,11 +245,11 @@ if __name__ == "__main__":
         #     total_loss_test, recon_loss_test, kl_loss_test, contra_loss_test, len_loss_test, latent_loss_test, mpjpe_pose_test, dtw_pose_test, mpjpe_text_test, dtw_text_test, test_idx = test(config, test_dataloader, model, epoch)
         
         if args.train: 
-            total_loss_train, recon_loss_train, mpjpe_train, dtw_train = train(config, train_dataloader, model, src_vocab, optimizer, clip_grad_fun)
+            total_loss_train, recon_loss_train, latent_loss_train, mpjpe_train, dtw_train = train(config, train_dataloader, model, src_vocab, optimizer, clip_grad_fun)
             loss_epochs.append(total_loss_train * 1000)
             scheduler.step(epoch)
         with torch.no_grad():
-            total_loss_test, recon_loss_test, mpjpe_test, dtw_test = test(config, test_dataloader, model, src_vocab)
+            total_loss_test, recon_loss_test, latent_loss_test, mpjpe_test, dtw_test = test(config, test_dataloader, model, src_vocab)
 
         is_best = mpjpe_test < args.previous_best and dtw_test < args.previous_best_dtw
         if args.train and is_best:
@@ -278,11 +272,11 @@ if __name__ == "__main__":
             )
 
         if args.train:
-            logging.info("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
-            logging.info("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
+            logging.info("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, latent: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, latent_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
+            logging.info("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, latent: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, latent_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
 
-            print("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
-            print("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
+            print("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, latent: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, latent_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
+            print("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, latent: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, latent_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
         
             if epoch % args.lr_decay_epoch == 0:
                 lr *= args.lr_decay_large

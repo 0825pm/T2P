@@ -85,4 +85,4 @@ model:
     bone_loss: "MSE"
   text_encoder:
     model_name: "google/gemma-2b"
-    hidden_size: 768
+    hidden_size: 2048
