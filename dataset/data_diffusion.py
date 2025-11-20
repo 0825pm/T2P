@@ -240,7 +240,7 @@ class SignProdDataset(data.Dataset):
                 latent_vectors = [latent_line[i:i + latent_size] for i in range(0, len(latent_line), latent_size*skip_frames)]
 
                 # Create a dataset examples out of the Source, Target Frames and FilesPath
-                if src_line != '' and trg_line != '':
+                if src_line != '' and trg_line != '' and cond_line != '' and latent_line != '':
                     examples.append(data.Example.fromlist(
                         [src_line, trg_frames, files_line, cond_vectors, latent_vectors], fields))
 

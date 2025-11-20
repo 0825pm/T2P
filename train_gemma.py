@@ -23,7 +23,6 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from common.utils import *
 import torch.optim as optim
-from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
 from common.camera import *
 from timm.utils import NativeScaler
 from timm.scheduler import create_scheduler
@@ -35,49 +34,12 @@ from einops import rearrange
 
 from utils.plot_videos import plot_video, alter_DTW_timing
 from utils.builders import build_gradient_clipper, build_optimizer, build_scheduler
-from dataset.data_qae import load_data, make_data_iter
+from dataset.data_diffusion import load_data, make_data_iter
 from dataset.batch import Batch
 from torchtext.data import Dataset
-from utils.utils_model import initial_optim, get_logger
-
 
 # torch.autograd.set_detect_anomaly(True)
-exec("from model." + args.model + " import QAE")
-
-class WarmupCosineDecayScheduler:
-    # train_t2m.py의 스케줄러 정의를 그대로 사용
-    def __init__(self, optimizer, warmup_iters, total_iters, min_lr=0):
-        self.optimizer = optimizer
-        self.warmup_iters = warmup_iters
-        self.total_iters = total_iters
-        self.min_lr = min_lr
-        self.warmup_scheduler = LambdaLR(optimizer, lr_lambda=self.warmup_lambda)
-        self.cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_iters - warmup_iters, eta_min=min_lr)
-        
-    def warmup_lambda(self, current_iter):
-        if current_iter < self.warmup_iters:
-            return float(current_iter) / float(max(1, self.warmup_iters))
-        return 1.0
-
-    def step(self, current_iter):
-        if current_iter < self.warmup_iters:
-            self.warmup_scheduler.step()
-        else:
-            # CosineAnnealingLR은 현재 step을 기준으로 T_max 이내에서 스케줄링하므로,
-            # warmup 이터를 뺀 값으로 계산합니다.
-            self.cosine_scheduler.step(current_iter - self.warmup_iters) 
-            
-    def state_dict(self):
-        return {
-            'warmup_iters': self.warmup_iters,
-            'total_iters': self.total_iters,
-            'min_lr': self.min_lr,
-        }
-
-    def load_state_dict(self, state_dict):
-        self.warmup_iters = state_dict['warmup_iters']
-        self.total_iters = state_dict['total_iters']
-        self.min_lr = state_dict['min_lr']
+exec("from model." + args.model + " import GEMMA")
 
 @torch.no_grad()
 def save_videos(config, dataloader, model, epoch, checkpoint_dir, src_vocab, num_samples=2):
@@ -102,7 +64,7 @@ def save_videos(config, dataloader, model, epoch, checkpoint_dir, src_vocab, num
     num_samples = min(num_samples, pose_input.shape[0])
     print(f"Saving {num_samples} seq2seq sampling videos...")
     
-    pose_output, recon_loss = model(pose_input, text_input, pose_length)
+    pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length)
     
     for i in range(num_samples):
         gt_len_i = pose_length[i].item()
@@ -133,6 +95,7 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
     
     loss_all = {"total_loss": AccumLoss(),
                 "recon_loss": AccumLoss(),
+                "latent_loss": AccumLoss(),
                 }
     
     all_dtw_pose = list()
@@ -150,11 +113,11 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         pose_input = rearrange(pose_input, "b f (n c) -> b f n c", c=3)
         pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
         pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
-        
+        qae_feat = batch.latent
         text_input = [" ".join([src_vocab.itos[batch.src[i][j]] for j in range(len(batch.src[i])-1)]) for i in range(len(batch.src))]
         
-        pose_output, recon_loss = model(pose_input, text_input, pose_length)
-        total_loss = recon_loss
+        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, qae_feat)
+        total_loss = recon_loss + latent_loss
         total_loss.backward()
         
         if clip_grad_fun is not None:
@@ -174,9 +137,11 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         N = pose_input.shape[0]
         loss_all["total_loss"].update(total_loss.detach().cpu().numpy() * N, N)
         loss_all["recon_loss"].update(recon_loss.detach().cpu().numpy() * N, N)
+        loss_all["latent_loss"].update(latent_loss.detach().cpu().numpy() * N, N)
         
     return loss_all["total_loss"].avg, \
             loss_all["recon_loss"].avg, \
+            loss_all["latent_loss"].avg, \
             np.mean(np.array(all_mpjpe_pose)) * 1000, np.mean(all_dtw_pose)
 
 @torch.no_grad()
@@ -231,9 +196,9 @@ if __name__ == "__main__":
 
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    TRAINING_CONFIG = config["training"]
-    MODEL_CONFIG = config["model"]["qae"]
-    batch_size = TRAINING_CONFIG["batch_size"]
+    train_config = config["training"]
+    model_config = config["model"]
+    batch_size = train_config["batch_size"]
     
     train_data, dev_data, test_data, src_vocab, trg_vocab = load_data(cfg=config)
     
@@ -247,9 +212,9 @@ if __name__ == "__main__":
                                     batch_type="sentence",
                                     train=False, shuffle=False)
     
-    lr = float(TRAINING_CONFIG["learning_rate"])
+    lr = float(train_config["learning_rate"])
     
-    model = QAE(MODEL_CONFIG).cuda()
+    model = GEMMA(model_config).cuda()
     
     # clip_grad_fun = build_gradient_clipper(config=train_config)
     # optimizer = build_optimizer(config=train_config, parameters=model.parameters())
@@ -269,27 +234,16 @@ if __name__ == "__main__":
     optimizer = optim.AdamW([{'params' : model.parameters()},
                              ],
                             lr=lr, weight_decay=0.01)
-    scheduler_args = Namespace(**TRAINING_CONFIG)
+    scheduler_args = Namespace(**config['training'])
     scheduler, _ = create_scheduler(scheduler_args, optimizer)
-    
-    # optimizer = initial_optim(
-    #     'all', TRAINING_CONFIG["learning_rate"], 1e-6, model, TRAINING_CONFIG["optimizer"]
-    # )
-    
-    # total_iter 설정 (예: 에포크 * 배치 수)
-    # TOTAL_ITERS = TRAINING_CONFIG["epochs"] * len(train_dataloader)
-    
-    # scheduler = WarmupCosineDecayScheduler(
-    #     optimizer, TRAINING_CONFIG["epochs"] // 100, TRAINING_CONFIG["epochs"], min_lr=TRAINING_CONFIG["min_lr"]
-    # )
     
     # loss_scaler = NativeScaler()
     
     if args.previous_dir != "":
-        Load_model(args, [model], ["model"])
+        Load_model(args, model.qae)
         
     best_epoch = 0
-    epoch = TRAINING_CONFIG["epochs"]
+    epoch = train_config["epochs"]
     loss_epochs = []
     mpjpes = []
     for epoch in range(1, epoch + 1):
@@ -324,13 +278,12 @@ if __name__ == "__main__":
             )
 
         if args.train:
-            # lr = optimizer.param_groups[0]['lr']
             logging.info("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
             logging.info("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
 
             print("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
             print("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
-
+        
             if epoch % args.lr_decay_epoch == 0:
                 lr *= args.lr_decay_large
                 for param_group in optimizer.param_groups:
