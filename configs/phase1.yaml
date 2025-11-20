@@ -3,6 +3,8 @@ data:
     src: "text"    # Source - Either Gloss->Pose or Text->Pose (gloss,text)
     trg: "skels"    # Target - 3D body co-ordinates (skels)
     files: "files"    # Filenames for each sequence
+    cond: "cond"
+    latent: "latent"
 
     train: "/home/user/Projects/Data/new_phoenix/train"
     dev: "/home/user/Projects/Data/new_phoenix/dev"
@@ -81,3 +83,6 @@ model:
     max_len: 300
     loss: "L1"
     bone_loss: "MSE"
+  text_encoder:
+    model_name: "google/gemma-2b"
+    hidden_size: 768

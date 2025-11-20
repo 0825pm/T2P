@@ -14,15 +14,6 @@ class T5XXLTextEncoder(nn.Module):
         for p in self.t5_model.parameters():
             p.requires_grad = False
             
-        # SentenceTransformer의 기본 출력 차원 확인 (sentencet5-xxl의 경우 768)
-        self.input_dim = self.t5_model.get_sentence_embedding_dimension()
-
-        # 2. T5 출력 차원을 QAE의 embed_dim으로 맞추는 Projection 층
-        if self.input_dim != embed_dim:
-            self.projection = nn.Linear(self.input_dim, embed_dim)
-        else:
-            self.projection = nn.Identity()
-
     def forward(self, text_list: list) -> torch.Tensor:
         device = next(self.parameters()).device
         
@@ -34,6 +25,4 @@ class T5XXLTextEncoder(nn.Module):
             device=device
         ) # (B, D_t5)
 
-        # 최종 Projection
-        context_vector = self.projection(embeddings) # (B, D_embed)
-        return context_vector
+        return embeddings

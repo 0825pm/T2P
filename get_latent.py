@@ -6,11 +6,27 @@ from tqdm import tqdm
 import einops
 from common.arguments import parse_args
 from common.utils import Load_model
-from dataset.data import load_data, make_data_iter
+from dataset.data_qae import load_data, make_data_iter
 from dataset.batch import Batch
 from model.qae import QAE 
 from model.text_encoder import T5XXLTextEncoder
 import logging
+
+def _save_as_text_format(data_array, file_path):
+    """
+    3D (B, L, D) 또는 2D (B, D) NumPy 배열을 각 샘플당 하나의 텍스트 라인으로 저장합니다.
+    숫자는 공백으로 구분되며, 이는 dataset.data에서 .split(" ")으로 읽기 위함입니다.
+    """
+    with open(file_path, 'w') as f:
+        for i in range(data_array.shape[0]):
+            # 다차원 배열을 1차원으로 평탄화하여 하나의 긴 시퀀스로 만듭니다.
+            # latent_seq: (L, D) -> (L*D)
+            # condition: (D) -> (D)
+            flattened_data = data_array[i].reshape(-1)
+            # 숫자를 문자열로 변환하고 공백으로 연결합니다.
+            # 소수점 정확도는 str()이 아닌, numpy.array2string 등을 사용해 제어할 수 있습니다.
+            line = ' '.join(map(str, flattened_data))
+            f.write(line + '\n')
 
 def load_config(path):
     with open(path, 'r') as ymlfile:
@@ -41,6 +57,7 @@ def extract_latents(args, config, QAE_model, text_encoder, phase="train"):
     
     all_latents = []
     all_conditions = []
+    all_texts = []
     
     QAE_model.eval()
     text_encoder.eval()
@@ -77,19 +94,28 @@ def extract_latents(args, config, QAE_model, text_encoder, phase="train"):
             # Store numpy arrays
             all_latents.append(latent_z.cpu().numpy())
             all_conditions.append(condition_c.cpu().numpy())
+            all_texts.extend(text_input)
             
     # Concatenate and save
-    final_latents = np.concatenate(all_latents, axis=0)
+    final_latents_array = np.concatenate(all_latents, axis=0)
     final_conditions = np.concatenate(all_conditions, axis=0)
+    final_texts = np.array(all_texts)
     
-    # Save files to a dedicated directory
     latent_save_dir = os.path.join(os.path.dirname(args.checkpoint.rstrip('/')), "latents")
     os.makedirs(latent_save_dir, exist_ok=True)
     
-    np.save(os.path.join(latent_save_dir, f"{phase}_latents.npy"), final_latents)
-    np.save(os.path.join(latent_save_dir, f"{phase}_conditions.npy"), final_conditions)
+    # 1. 시퀀스 잠재 벡터 저장 (.latent 확장자)
+    _save_as_text_format(final_latents_array, 
+                         os.path.join(latent_save_dir, f"{phase}.latent"))
+
+    # 2. 텍스트 조건 벡터 저장 (.cond 확장자)
+    _save_as_text_format(final_conditions, 
+                         os.path.join(latent_save_dir, f"{phase}.cond"))
     
-    logging.info(f"Saved latents: {final_latents.shape}, conditions: {final_conditions.shape}")
+    _save_as_text_format(final_texts, 
+                         os.path.join(latent_save_dir, f"{phase}.ntext"))
+    
+    logging.info(f"Saved sequence latents to {phase}_latents.latent, conditions to {phase}_conditions.cond")
 
 if __name__ == "__main__":
     args = parse_args()
