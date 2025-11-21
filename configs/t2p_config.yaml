@@ -86,3 +86,5 @@ model:
   text_encoder:
     model_name: "google/gemma-2b"
     hidden_size: 2048
+    # model_name: "google/gemma-3-270m"
+    # hidden_size: 640

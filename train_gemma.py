@@ -34,7 +34,7 @@ from einops import rearrange
 
 from utils.plot_videos import plot_video, alter_DTW_timing
 from utils.builders import build_gradient_clipper, build_optimizer, build_scheduler
-from dataset.data_diffusion import load_data, make_data_iter
+from dataset.data_orthus import load_data, make_data_iter
 from dataset.batch import Batch
 from torchtext.data import Dataset
 
@@ -59,13 +59,12 @@ def save_videos(config, dataloader, model, epoch, checkpoint_dir, src_vocab, num
     pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
     pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
     
-    qae_feat = batch.latent
     text_input = batch.text
     
     num_samples = min(num_samples, pose_input.shape[0])
     print(f"Saving {num_samples} seq2seq sampling videos...")
     
-    pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, qae_feat)
+    pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length)
     
     for i in range(num_samples):
         gt_len_i = pose_length[i].item()
@@ -114,10 +113,9 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         pose_input = rearrange(pose_input, "b f (n c) -> b f n c", c=3)
         pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
         pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
-        qae_feat = batch.latent
         text_input = batch.text
         
-        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, qae_feat)
+        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length)
         total_loss = recon_loss + latent_loss
         total_loss.backward()
         
@@ -167,10 +165,9 @@ def test(config, dataloader, model, src_vocab):
         pose_input = rearrange(pose_input, "b f (n c) -> b f n c", c=3)
         pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
         pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
-        qae_feat = batch.latent
         text_input = batch.text
         
-        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, qae_feat)
+        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length)
         total_loss = recon_loss + latent_loss
         
         pose_output = pose_output.to(torch.float32) * pose_mask
