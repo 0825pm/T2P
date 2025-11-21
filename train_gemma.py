@@ -60,11 +60,12 @@ def save_videos(config, dataloader, model, epoch, checkpoint_dir, src_vocab, num
     pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
     
     text_input = batch.text
+    cond_input = batch.cond
     
     num_samples = min(num_samples, pose_input.shape[0])
     print(f"Saving {num_samples} seq2seq sampling videos...")
     
-    pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length)
+    pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, cond_input)
     
     for i in range(num_samples):
         gt_len_i = pose_length[i].item()
@@ -114,8 +115,9 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
         pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
         text_input = batch.text
+        cond_input = batch.cond
         
-        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length)
+        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, cond_input)
         total_loss = recon_loss + latent_loss
         total_loss.backward()
         
@@ -166,8 +168,9 @@ def test(config, dataloader, model, src_vocab):
         pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
         pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
         text_input = batch.text
+        cond_input = batch.cond
         
-        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length)
+        pose_output, recon_loss, latent_loss = model(pose_input, text_input, pose_length, cond_input)
         total_loss = recon_loss + latent_loss
         
         pose_output = pose_output.to(torch.float32) * pose_mask

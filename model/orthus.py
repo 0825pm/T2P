@@ -167,7 +167,7 @@ class GEMMA(nn.Module):
         
         return context_vector
     
-    def forward(self, pose_input, text_input, pose_length):
+    def forward(self, pose_input, text_input, pose_length, cond_input):
         B, T, N, C = pose_input.shape
         device = pose_input.device
 
@@ -180,7 +180,8 @@ class GEMMA(nn.Module):
         z_gt_seq = rearrange(qae_feat, 'b h t j -> b (t j) h') 
         
         # 1. Text Context Vector 추출: (B, 1, H_gemma)
-        context_vector = self._get_text_context_vector(text_input, device) 
+        # context_vector = self._get_text_context_vector(text_input, device)
+        context_vector = cond_input
         
         # 2. Latent Data 준비 및 Embedding 
         L_AR_Input = self.total_latent_tokens - 1 
