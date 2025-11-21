@@ -258,8 +258,8 @@ class GEMMA(nn.Module):
         # Reconstruction loss (Auxiliary)
         pose_input_flat = einops.rearrange(pose_input, "b f n c -> b f (n c)")
         pose_output_flat = einops.rearrange(pose_decoded, "b f n c -> b f (n c)")
-        recon_loss = self.aux_loss_fn(pose_output_flat, pose_input_flat)
-        # recon_loss = self.loss(pose_output_flat, pose_input_flat)
+        # recon_loss = self.aux_loss_fn(pose_output_flat, pose_input_flat)
+        recon_loss = self.loss(pose_output_flat, pose_input_flat)
         # recon_loss = torch.tensor([0.0], device=device)
 
         # 주 학습 손실은 Diffusion Loss입니다.
