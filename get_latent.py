@@ -8,7 +8,7 @@ from common.arguments import parse_args
 from common.utils import Load_model
 from dataset.data_condition import load_data, make_data_iter
 from dataset.batch import Batch
-from model.orthus import GEMMA 
+from model.gemma import GEMMA 
 import logging
 
 def _save_as_text_format(data_array, file_path):

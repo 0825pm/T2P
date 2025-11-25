@@ -20,7 +20,6 @@ def load_data(cfg: dict) -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vo
     src_lang = data_cfg["src"]
     trg_lang = data_cfg["trg"]
     files_lang = data_cfg.get("files", "files")
-    cond_lang = data_cfg["cond"]
     # Train, Dev and Test Path
     train_path = data_cfg["train"]
     dev_path = data_cfg["dev"]
@@ -31,7 +30,6 @@ def load_data(cfg: dict) -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vo
     max_sent_length = data_cfg["max_sent_length"]
     # Target size is plus one due to the counter required for the model
     trg_size = cfg["model"]["trg_size"] + 1
-    cond_size = cfg["model"]["text_encoder"]["hidden_size"]
     # Skip frames is used to skip a set proportion of target frames, to simplify the model requirements
     skip_frames = data_cfg.get("skip_frames", 1)
 
@@ -68,22 +66,12 @@ def load_data(cfg: dict) -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vo
                                pad_token=torch.ones((trg_size,))*TARGET_PAD,
                                preprocessing=tokenize_features,
                                postprocessing=stack_features,)
-    
-    reg_cond_field = data.Field(sequential=True,
-                               use_vocab=False,
-                               dtype=torch.float32,
-                               batch_first=True,
-                               include_lengths=False,
-                               pad_token=torch.ones((cond_size,))*TARGET_PAD,
-                               preprocessing=tokenize_features,
-                               postprocessing=stack_features,)
 
     # Create the Training Data, using the SignProdDataset
     train_data = SignProdDataset(path=train_path,
-                                 exts=("." + src_lang, "." + trg_lang, "." + files_lang, "." + cond_lang),
-                                 fields=(src_field, reg_trg_field, files_field, text_field, reg_cond_field),
+                                 exts=("." + src_lang, "." + trg_lang, "." + files_lang),
+                                 fields=(src_field, reg_trg_field, files_field, text_field),
                                  trg_size=trg_size,
-                                 cond_size=cond_size,
                                  skip_frames=skip_frames,
                                  filter_pred=
                                  lambda x: len(vars(x)['src'])
@@ -104,19 +92,17 @@ def load_data(cfg: dict) -> (Dataset, Dataset, Optional[Dataset], Vocabulary, Vo
 
     # Create the Validation Data
     dev_data = SignProdDataset(path=dev_path,
-                               exts=("." + src_lang, "." + trg_lang, "." + files_lang, "." + cond_lang),
+                               exts=("." + src_lang, "." + trg_lang, "." + files_lang),
                                trg_size=trg_size,
-                               cond_size=cond_size,
-                               fields=(src_field, reg_trg_field, files_field, text_field, reg_cond_field),
+                               fields=(src_field, reg_trg_field, files_field, text_field),
                                skip_frames=skip_frames)
 
     # Create the Testing Data
     test_data = SignProdDataset(
         path=test_path,
-        exts=("." + src_lang, "." + trg_lang, "." + files_lang, "." + cond_lang),
+        exts=("." + src_lang, "." + trg_lang, "." + files_lang),
         trg_size=trg_size,
-        cond_size=cond_size,
-        fields=(src_field, reg_trg_field, files_field, text_field, reg_cond_field),
+        fields=(src_field, reg_trg_field, files_field, text_field),
         skip_frames=skip_frames)
 
     src_field.vocab = src_vocab
@@ -179,7 +165,7 @@ def make_data_iter(dataset: Dataset, batch_size: int, batch_type: str = "sentenc
 class SignProdDataset(data.Dataset):
     """Defines a dataset for machine translation."""
 
-    def __init__(self, path, exts, fields, trg_size, cond_size, skip_frames=1, **kwargs):
+    def __init__(self, path, exts, fields, trg_size, skip_frames=1, **kwargs):
         """Create a TranslationDataset given paths and fields.
 
         Arguments:
@@ -192,42 +178,37 @@ class SignProdDataset(data.Dataset):
         """
 
         if not isinstance(fields[0], (tuple, list)):
-            fields = [('src', fields[0]), ('trg', fields[1]), ('file_paths', fields[2]), ('text', fields[3]), ('cond', fields[4])]
+            fields = [('src', fields[0]), ('trg', fields[1]), ('file_paths', fields[2]), ('text', fields[3])]
 
-        src_path, trg_path, file_path, cond_path = tuple(os.path.expanduser(path + x) for x in exts)
+        src_path, trg_path, file_path = tuple(os.path.expanduser(path + x) for x in exts)
 
         examples = []
         # Extract the parallel src, trg and file files
         with io.open(src_path, mode='r', encoding='utf-8') as src_file, \
                 io.open(trg_path, mode='r', encoding='utf-8') as trg_file, \
-                    io.open(file_path, mode='r', encoding='utf-8') as files_file, \
-                        io.open(cond_path, mode='r', encoding='utf-8') as cond_file:
+                    io.open(file_path, mode='r', encoding='utf-8') as files_file:
 
             i = 0
             # For Source, Target and FilePath
-            for src_line, trg_line, files_line, cond_line in zip(src_file, trg_file, files_file, cond_file):
+            for src_line, trg_line, files_line in zip(src_file, trg_file, files_file):
                 i+= 1
 
                 # Strip away the "\n" at the end of the line
-                src_line, trg_line, files_line, cond_line = src_line.strip(), trg_line.strip(), files_line.strip(), cond_line.strip()
+                src_line, trg_line, files_line = src_line.strip(), trg_line.strip(), files_line.strip()
 
                 # Split target into joint coordinate values
                 trg_line = trg_line.split(" ")
-                cond_line = cond_line.split(" ")
-                
                 if len(trg_line) == 1:
                     continue
                 # Turn each joint into a float value, with 1e-8 for numerical stability
                 trg_line = [(float(joint) + 1e-8) for joint in trg_line]
-                cond_line = [(float(cond) + 1e-8) for cond in cond_line]
                 # Split up the joints into frames, using trg_size as the amount of coordinates in each frame
                 # If using skip frames, this just skips over every Nth frame
                 trg_frames = [trg_line[i:i + trg_size] for i in range(0, len(trg_line), trg_size*skip_frames)]
-                cond_frames = [cond_line[i:i + cond_size] for i in range(0, len(cond_line), cond_size*skip_frames)]
-                
+
                 # Create a dataset examples out of the Source, Target Frames and FilesPath
                 if src_line != '' and trg_line != '':
                     examples.append(data.Example.fromlist(
-                        [src_line, trg_frames, files_line, src_line, cond_frames], fields))
+                        [src_line, trg_frames, files_line, src_line], fields))
 
         super(SignProdDataset, self).__init__(examples, fields, **kwargs)

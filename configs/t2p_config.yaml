@@ -84,7 +84,7 @@ model:
     loss: "L1"
     bone_loss: "MSE"
   text_encoder:
-    model_name: "google/gemma-2b"
-    hidden_size: 2048
-    # model_name: "google/gemma-3-270m"
-    # hidden_size: 640
+    # model_name: "google/gemma-2b"
+    # hidden_size: 2048
+    model_name: "google/flan-t5-base"
+    hidden_size: 768

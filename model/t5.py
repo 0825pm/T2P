@@ -7,7 +7,7 @@ import einops
 
 from model.qae import QAE # QAE는 Pose Feature를 추출/디코딩하는 역할을 수행합니다.
 from common.loss import Loss
-from transformers import AutoTokenizer, GemmaForCausalLM
+from transformers import AutoTokenizer, T5EncoderModel, T5Config, T5ForConditionalGeneration
 from peft import LoraConfig, get_peft_model, TaskType
 from diffusers import DDPMScheduler
 
@@ -48,7 +48,7 @@ class SimpleMLPAdaLN(nn.Module):
         
         # Time and Context Embedding
         timesteps = timesteps.unsqueeze(-1).to(h.dtype) / 1000.0
-        time_emb = self.time_embed(timesteps).unsqueeze(1)
+        time_emb = self.time_embed(timesteps)
         context_emb = self.context_proj(z)
 
         # Apply simplified conditional modulation
@@ -83,7 +83,8 @@ class GEMMA(nn.Module):
         
         self.tokenizer = AutoTokenizer.from_pretrained(gemma_model_name)
         # Gemma는 Multimodal AR Backbone으로 사용됩니다.
-        self.text_model = GemmaForCausalLM.from_pretrained(gemma_model_name)
+        self.text_model = T5ForConditionalGeneration.from_pretrained(gemma_model_name)
+        
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
@@ -99,6 +100,7 @@ class GEMMA(nn.Module):
         for param in self.text_model.parameters():
             param.requires_grad = False
         self.text_model.eval()
+        self.decoder = self.text_model.decoder
         # print("="*50)
         # self.text_model.print_trainable_parameters()
         # print("="*50)
@@ -149,7 +151,7 @@ class GEMMA(nn.Module):
         ).to(device)
 
         # Gemma CausalLM forward pass (Hidden State 반환)
-        gemma_output = self.text_model(
+        gemma_output = self.text_model.encoder(
             **tokenized, 
             output_hidden_states=True,
             return_dict=True
@@ -180,8 +182,8 @@ class GEMMA(nn.Module):
         z_gt_seq = rearrange(qae_feat, 'b h t j -> b (t j) h') 
         
         # 1. Text Context Vector 추출: (B, 1, H_gemma)
-        # context_vector = self._get_text_context_vector(text_input, device)
-        context_vector = cond_input
+        context_vector = self._get_text_context_vector(text_input, device)
+        # context_vector = cond_input
         
         # 2. Latent Data 준비 및 Embedding 
         L_AR_Input = self.total_latent_tokens - 1 
@@ -204,7 +206,7 @@ class GEMMA(nn.Module):
         attention_mask = torch.ones(B, L_AR_Full, dtype=torch.long, device=device) 
         
         # 5. Gemma Forward Pass (Autoregressive Backbone)
-        outputs = self.text_model(
+        outputs = self.decoder(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             output_hidden_states=True,

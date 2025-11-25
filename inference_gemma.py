@@ -12,7 +12,7 @@ import time
 from common.arguments import parse_args
 from dataset.data_orthus import load_data, make_data_iter
 from dataset.batch import Batch
-from model.gemma import GEMMA
+from model.gemma_no_diffusion import GEMMA
 from utils.plot_videos import plot_video, alter_DTW_timing
 from common.utils import calculate_dtw
 
