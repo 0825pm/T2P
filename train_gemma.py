@@ -34,7 +34,8 @@ from einops import rearrange
 
 from utils.plot_videos import plot_video, alter_DTW_timing
 from utils.builders import build_gradient_clipper, build_optimizer, build_scheduler
-from dataset.data_gan import load_data, make_data_iter
+# from dataset.data_gan import load_data, make_data_iter
+from dataset.data_orthus import load_data, make_data_iter
 from dataset.batch import Batch
 from torchtext.data import Dataset
 

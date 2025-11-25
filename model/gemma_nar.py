@@ -47,12 +47,13 @@ class SimpleMLPAdaLN(nn.Module):
         h = self.proj_in(h)
         
         # Time and Context Embedding
-        timesteps = timesteps.unsqueeze(-1).to(h.dtype) / 1000.0
-        time_emb = self.time_embed(timesteps)
+        # timesteps = timesteps.unsqueeze(-1).to(h.dtype) / 1000.0
+        # time_emb = self.time_embed(timesteps).unsqueeze(1)
         context_emb = self.context_proj(z)
 
         # Apply simplified conditional modulation
-        c = time_emb + context_emb
+        # c = time_emb + context_emb
+        c = context_emb
         h = h + self.block(h) + c
         
         out = self.proj_out(h)
@@ -109,8 +110,28 @@ class GEMMA(nn.Module):
         # 2. Text Context Vector Projector 
         self.text_context_proj = nn.Linear(self.gemma_hidden_size, self.gemma_hidden_size)
         
-        self.query_tokens = nn.Parameter(torch.randn(1, self.total_latent_tokens-1, self.gemma_hidden_size))
-        nn.init.normal_(self.query_tokens, std=0.02)
+        # 3. Diffusion Head
+        # Gemma hidden state를 조건으로 사용하여 Latent Dimension을 예측
+        self.diffusion_head = SimpleMLPAdaLN(
+            in_channels=self.latent_dim,      # 64
+            model_channels=self.gemma_hidden_size, # 2048
+            out_channels=self.latent_dim,     # 64
+            z_channels=self.gemma_hidden_size, # 2048
+            num_res_blocks=3
+        )
+
+        # 4. Diffusion Scheduler (DDPMScheduler for training - Orthus 논문 참고)
+        self.train_scheduler = DDPMScheduler(
+            beta_schedule="scaled_linear",
+            beta_start=0.00085,
+            beta_end=0.012,
+            num_train_timesteps=1000,
+            clip_sample=False,
+            prediction_type="v_prediction",
+            steps_offset=1,
+            timestep_spacing="trailing",
+            rescale_betas_zero_snr=True
+        )
 
         # 5. Output Projection for Reconstruction Path (기존 gemma.py의 latent_pred_head)
         self.latent_pred_head = nn.Linear(self.gemma_hidden_size, self.latent_dim)
@@ -158,7 +179,7 @@ class GEMMA(nn.Module):
         
         # qae_feat_gt: (B, total_latent_tokens=24, dim=64)
         z_gt_seq = rearrange(qae_feat, 'b h t j -> b (t j) h') 
-        decoder_inputs = self.query_tokens.repeat(B, 1, 1)
+        
         # 1. Text Context Vector 추출: (B, 1, H_gemma)
         # context_vector = self._get_text_context_vector(text_input, device)
         context_vector = cond_input
@@ -174,11 +195,11 @@ class GEMMA(nn.Module):
         z_input = z_gt_seq[:, :L_AR_Input, :]
         
         # Latent Token Embedding: (B, 23, 64) -> (B, 23, H_gemma)
-        # z_emb = self.latent_token_proj(z_input) 
+        z_emb = self.latent_token_proj(z_input) 
 
         # 3. AR 입력 시퀀스 구성 (Context + Latent Tokens)
         # inputs_embeds: (B, 24, H_gemma)
-        inputs_embeds = torch.cat([context_vector, decoder_inputs], dim=1) 
+        inputs_embeds = torch.cat([context_vector, z_emb], dim=1) 
         
         # 4. Attention Mask 구성 
         attention_mask = torch.ones(B, L_AR_Full, dtype=torch.long, device=device) 
@@ -192,36 +213,8 @@ class GEMMA(nn.Module):
         )
 
         # 6. Condition Vector for Diffusion Head (z_cond): (B, 24, H_gemma)
-        z_cond = outputs.hidden_states[-1]
+        z_cond = outputs.hidden_states[-1] 
         
-        # # 7. Diffusion Loss 계산 (Orthus Core)
-        
-        # # Target latent vector (x_0): (B * L_AR_Full, D_latent)
-        # x_0_flat = z_target.reshape(B * L_AR_Full, -1)
-        # z_cond_flat = z_cond.reshape(B * L_AR_Full, -1)
-        
-        # # Repeat batch for diffusion training
-        # x_0_repeated = x_0_flat.repeat(self.diffusion_batch_mul, 1)
-        # z_cond_repeated = z_cond_flat.repeat(self.diffusion_batch_mul, 1)
-        
-        # # 7.1. Sample noise and timesteps
-        # timesteps = torch.randint(0, 1000, (x_0_repeated.shape[0],), dtype=torch.int64, device=device)
-        # noise = torch.randn_like(x_0_repeated, device=device)
-        
-        # # 7.2. Apply noise (x_t)
-        # # Orthus 논문의 구현에 따라, latent vector에 scaling을 적용할 수 있습니다.
-        # # 여기서는 모델링 편의를 위해 scaling을 생략합니다.
-        # noisy_latents = self.train_scheduler.add_noise(x_0_repeated, noise, timesteps)
-        
-        # # 7.3. Predict target (v-prediction)
-        # target = self.train_scheduler.get_velocity(x_0_repeated, noise, timesteps)
-        
-        # # 7.4. Diffusion Head Prediction
-        # model_pred = self.diffusion_head(noisy_latents, timesteps, z_cond_repeated)
-        
-        # # 7.5. Calculate Diffusion Loss
-        # diff_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-
         # 8. Reconstruction Path (기존 API 호환성을 위한 처리. 실제 생성은 Inference 단계에서 별도 구현 필요)
         # Gemma 출력을 단순 선형 투사하여 포즈로 디코딩 (Diffusion의 결과가 아님)
         latent_pred = self.latent_pred_head(z_cond) # (B, 24, 64)
@@ -281,20 +274,7 @@ class GEMMA(nn.Module):
             )
             
             z_cond = outputs.hidden_states[-1][:, -1, :].unsqueeze(1) 
-            latent_sample = torch.randn(B, 1, self.latent_dim, device=device)
-            self.train_scheduler.set_timesteps(diffusion_steps)
-            
-            for t in self.train_scheduler.timesteps:
-                timesteps_tensor = torch.full((B,), t, device=device, dtype=torch.long)
-                
-                # SimpleMLPAdaLN forward (차원 보정 로직 포함된 버전 사용 가정)
-                model_output = self.diffusion_head(latent_sample, timesteps_tensor, z_cond)
-                
-                latent_sample = self.train_scheduler.step(
-                    model_output, t, latent_sample
-                ).prev_sample
-                
-            generated_latents.append(latent_sample.squeeze(1))
+            generated_latents.append(z_cond.squeeze(1))
 
         final_latents = torch.stack(generated_latents, dim=1)
         
