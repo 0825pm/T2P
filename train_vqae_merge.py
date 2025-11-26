@@ -65,7 +65,7 @@ def save_videos(config, dataloader, model, epoch, checkpoint_dir, src_vocab, num
     num_samples = min(num_samples, pose_input.shape[0])
     print(f"Saving {num_samples} seq2seq sampling videos...")
     
-    pose_output, _, _, _, _ = model(pose_input, text_input, pose_length)
+    pose_output, _, _ = model(pose_input, text_input, pose_length)
     
     for i in range(num_samples):
         gt_len_i = pose_length[i].item()
@@ -109,9 +109,8 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
     all_dtw_pose = list()
     all_mpjpe_pose = list()
     
-    body_counter = Counter()
-    rhand_counter = Counter()
-    lhand_counter = Counter()
+    num_quantizers = model.quantizer.num_quantizers
+    quantizer_counters = [Counter() for _ in range(num_quantizers)]
     
     model.train()
 
@@ -129,11 +128,13 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         
         text_input = [" ".join([src_vocab.itos[batch.src[i][j]] for j in range(len(batch.src[i])-1)]) for i in range(len(batch.src))]
         
-        pose_output, recon_loss, body_indices, rhand_indices, lhand_indices = model(pose_input, text_input, pose_length)
+        pose_output, recon_loss, indices = model(pose_input, text_input, pose_length)
         
-        body_counter.update(body_indices.detach().cpu().view(-1).tolist())
-        rhand_counter.update(rhand_indices.detach().cpu().view(-1).tolist())
-        lhand_counter.update(lhand_indices.detach().cpu().view(-1).tolist())
+        indices_np = indices.detach().cpu().numpy() # (B, N, Q)
+        for q_idx in range(num_quantizers):
+            # 해당 Quantizer (q_idx)의 모든 인덱스를 평탄화하여 카운트
+            q_indices = indices_np[:, :, q_idx].flatten()
+            quantizer_counters[q_idx].update(q_indices)
         
         total_loss = recon_loss
         total_loss.backward()
@@ -156,10 +157,9 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         loss_all["total_loss"].update(total_loss.detach().cpu().numpy() * N, N)
         loss_all["recon_loss"].update(recon_loss.detach().cpu().numpy() * N, N)
     
-    log_msg = "\n[TRAIN Epoch Codebook Stats]\n"
-    log_msg += get_stats_str("Body ", body_counter) + "\n"
-    log_msg += get_stats_str("RHand", rhand_counter) + "\n"
-    log_msg += get_stats_str("LHand", lhand_counter)
+    log_msg = "\n[TRAIN Epoch ResidualFSQ Stats]\n"
+    for q_idx in range(num_quantizers):
+        log_msg += get_stats_str(f"Quantizer {q_idx}", quantizer_counters[q_idx]) + "\n"
     logging.info(log_msg)
     print(log_msg)
     
@@ -177,9 +177,8 @@ def test(config, dataloader, model, src_vocab):
     all_dtw_pose = list()
     all_mpjpe_pose = list()
     
-    body_counter = Counter()
-    rhand_counter = Counter()
-    lhand_counter = Counter()
+    num_quantizers = model.quantizer.num_quantizers
+    quantizer_counters = [Counter() for _ in range(num_quantizers)]
     
     model.eval()
 
@@ -196,11 +195,12 @@ def test(config, dataloader, model, src_vocab):
         
         text_input = [" ".join([src_vocab.itos[batch.src[i][j]] for j in range(len(batch.src[i])-1)]) for i in range(len(batch.src))]
         
-        pose_output, recon_loss, body_indices, rhand_indices, lhand_indices = model(pose_input, text_input, pose_length)
+        pose_output, recon_loss, indices = model(pose_input, text_input, pose_length)
         
-        body_counter.update(body_indices.detach().cpu().view(-1).tolist())
-        rhand_counter.update(rhand_indices.detach().cpu().view(-1).tolist())
-        lhand_counter.update(lhand_indices.detach().cpu().view(-1).tolist())
+        indices_np = indices.cpu().numpy()
+        for q_idx in range(num_quantizers):
+            q_indices = indices_np[:, :, q_idx].flatten()
+            quantizer_counters[q_idx].update(q_indices)
         
         total_loss = recon_loss
         
@@ -215,10 +215,9 @@ def test(config, dataloader, model, src_vocab):
         loss_all["total_loss"].update(total_loss.detach().cpu().numpy() * N, N)
         loss_all["recon_loss"].update(recon_loss.detach().cpu().numpy() * N, N)
     
-    log_msg = "\n[TEST Epoch Codebook Stats]\n"
-    log_msg += get_stats_str("Body ", body_counter) + "\n"
-    log_msg += get_stats_str("RHand", rhand_counter) + "\n"
-    log_msg += get_stats_str("LHand", lhand_counter)
+    log_msg = "\n[TEST Epoch ResidualFSQ Stats]\n"
+    for q_idx in range(num_quantizers):
+        log_msg += get_stats_str(f"Quantizer {q_idx}", quantizer_counters[q_idx]) + "\n"
     logging.info(log_msg)
     print(log_msg)
     

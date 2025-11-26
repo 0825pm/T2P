@@ -7,12 +7,8 @@ import einops
 
 from model.qformer import QFormer
 from common.loss import Loss
-from vector_quantize_pytorch import FSQ
-    
-def calculate_velocity_loss(pred, target):
-    pred_vel = pred[:, 1:] - pred[:, :-1]
-    target_vel = target[:, 1:] - target[:, :-1]
-    return torch.mean(torch.abs(pred_vel - target_vel))
+from vector_quantize_pytorch import ResidualFSQ, LatentQuantize, ResidualVQ
+
 
 class BertLayerNorm(nn.Module):
     """TF 스타일의 LayerNorm (epsilon이 제곱근 안에 있음)"""
@@ -207,78 +203,66 @@ class QAE(nn.Module):
         qk_scale = config['qk_scale']
         
         self.loss = Loss(cfg = config, target_pad=0.0)
-        # 1. 임베딩 및 Positional Encoding
+
+        # 1. 임베딩 (기존 유지)
         self.pose_emb = nn.Linear(8 * 3, embed_dim)
         self.rhand_emb = nn.Linear(21 * 3, embed_dim)
         self.lhand_emb = nn.Linear(21 * 3, embed_dim)
 
-        self.spa_pos_emb = nn.Parameter(torch.zeros(1, 3, embed_dim)) # [1, 3, C] for pose, rhand, lhand
-        self.tem_pos_emb = nn.Parameter(torch.zeros(1, config['max_len'], embed_dim)) # [1, T, C]
+        # Positional Encoding (기존 유지)
+        self.spa_pos_emb = nn.Parameter(torch.zeros(1, 3, embed_dim)) 
+        self.tem_pos_emb = nn.Parameter(torch.zeros(1, config['max_len'], embed_dim)) 
 
-        # 2. 인코더 (논문과 동일한 Transformer 구조)
+        # 2. 인코더
+        # Spatial Transformer는 3개 파트 간의 관계를 학습하므로 유지
         self.enc_spa_vit = Encoder(dim=embed_dim, depth=depth, heads=num_heads, mlp_dim=mlp_dim, dropout=0.1)
+        
+        # [변경] Merge Projection: (Body + R + L) -> Combined
+        # 3개의 파트(3 * embed_dim)를 1개의 파트(embed_dim)로 압축
+        self.merge_proj = nn.Linear(embed_dim * 3, embed_dim)
+
+        # Temporal Transformer는 이제 병합된 1개의 시퀀스만 처리합니다.
         self.enc_tem_vit = Encoder(dim=embed_dim, depth=depth, heads=num_heads, mlp_dim=mlp_dim, dropout=0.1)
         
-        self.pose_query = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
-        self.pose_query.data.normal_(mean=0.0, std=0.02)
-        self.pose_pos_emb = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
-        self.pose_pos_emb.data.normal_(mean=0.0, std=0.02)
+        # 3. Bottleneck (Q-Former)
+        # [변경] 3개의 Q-Former 대신 1개만 사용
+        self.unified_query = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
+        self.unified_query.data.normal_(mean=0.0, std=0.02)
         
-        self.rhand_query = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
-        self.rhand_query.data.normal_(mean=0.0, std=0.02)
-        self.rhand_pos_emb = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
-        self.rhand_pos_emb.data.normal_(mean=0.0, std=0.02)
-        
-        self.lhand_query = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
-        self.lhand_query.data.normal_(mean=0.0, std=0.02)
-        self.lhand_pos_emb = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
-        self.lhand_pos_emb.data.normal_(mean=0.0, std=0.02)
+        self.unified_pos_emb = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
+        self.unified_pos_emb.data.normal_(mean=0.0, std=0.02)
 
-        self.body_qformer = QFormer(embed_dim=embed_dim,
-                               drop_rate=drop_rate,
-                               depth=depth,
-                               num_heads=num_heads
-                               )      
+        self.qformer_model = QFormer(embed_dim=embed_dim,
+                                     drop_rate=config['drop_rate'],
+                                     depth=depth,
+                                     num_heads=num_heads)
         
-        self.rhand_qformer = QFormer(embed_dim=embed_dim,
-                               drop_rate=drop_rate,
-                               depth=depth,
-                               num_heads=num_heads
-                               )      
-        
-        
-        self.lhand_qformer = QFormer(embed_dim=embed_dim,
-                               drop_rate=drop_rate,
-                               depth=depth,
-                               num_heads=num_heads
-                               )
-        
-        fsq_levels = [8, 5, 5, 5]
-        fsq_dim = len(fsq_levels)
-        # Body
-        self.body_quantizer = FSQ(levels=fsq_levels)
-        self.body_proj_in = nn.Linear(embed_dim, fsq_dim)  # 128 -> 4
-        self.body_proj_out = nn.Linear(fsq_dim, embed_dim) # 4 -> 128
-        
-        # Right Hand
-        self.rhand_quantizer = FSQ(levels=fsq_levels)
-        self.rhand_proj_in = nn.Linear(embed_dim, fsq_dim)
-        self.rhand_proj_out = nn.Linear(fsq_dim, embed_dim)
-        
-        # Left Hand
-        self.lhand_quantizer = FSQ(levels=fsq_levels)
-        self.lhand_proj_in = nn.Linear(embed_dim, fsq_dim)
-        self.lhand_proj_out = nn.Linear(fsq_dim, embed_dim)     
-        
-        # 4. 디코더 (논문과 동일한 Transformer 구조)
-        self.dec_spa_vit = Encoder(dim=embed_dim, depth=depth, heads=num_heads, mlp_dim=mlp_dim, dropout=0.1)
+        self.quantizer = ResidualVQ(
+            dim = embed_dim,
+            num_quantizers = 4,
+            codebook_size = 1024,
+            stochastic_sample_codes = True,
+            sample_codebook_temp = 0.1,         # temperature for stochastically sampling codes, 0 would be equivalent to non-stochastic
+            shared_codebook = True              # whether to share the codebooks for all quantizers or not
+        )
+
+        # 4. 디코더
+        # Temporal Transformer (1개의 시퀀스 처리)
         self.dec_tem_vit = Encoder(dim=embed_dim, depth=depth, heads=num_heads, mlp_dim=mlp_dim, dropout=0.1)
-        self.dec_ca = Cross_Attention(embed_dim, num_heads=num_heads, qkv_bias=qkv_bias, \
-            qk_scale=qk_scale, attn_drop=attn_drop_rate, proj_drop=drop_rate)
+        self.dec_ca = Cross_Attention(embed_dim, num_heads=num_heads, qkv_bias=config['qkv_bias'], \
+            qk_scale=config['qk_scale'], attn_drop=config['attn_drop_rate'], proj_drop=config['drop_rate'])
         self.dec_token = nn.Parameter(torch.zeros(1, config['max_len'], embed_dim))
-        # 5. SPL (Structured Prediction Layer)
+
+        # [변경] Split Projection: Combined -> (Body + R + L)
+        # 1개의 파트(embed_dim)를 다시 3개의 파트(3 * embed_dim)로 복원
+        self.split_proj = nn.Linear(embed_dim, embed_dim * 3)
+
+        # Spatial Transformer (복원된 3개 파트 간의 관계 정제)
+        self.dec_spa_vit = Encoder(dim=embed_dim, depth=depth, heads=num_heads, mlp_dim=mlp_dim, dropout=0.1)
+
+        # 5. SPL (Structured Prediction Layer) - 기존 유지
         self.pose_spl = SPL(input_size=embed_dim, hidden_layers=5, hidden_units=embed_dim, joint_size=3, SKELETON="sign_pose")
-        self.hand_spl = SPL(input_size=embed_dim, hidden_layers=5, hidden_units=embed_dim, joint_size=3, SKELETON="sign_hand")        
+        self.hand_spl = SPL(input_size=embed_dim, hidden_layers=5, hidden_units=embed_dim, joint_size=3, SKELETON="sign_hand")      
     
     def _get_mask(self, x_len, size, device):
         pos = torch.arange(0, size, device=device).unsqueeze(0).repeat(x_len.size(0), 1)
@@ -289,123 +273,121 @@ class QAE(nn.Module):
         B, T, N, C = pose_input.shape
         device = pose_input.device
 
+        # 1. Part Embeddings
         body_input = pose_input[:, :, :8, :].reshape(B, T, -1)
         rhand_input = pose_input[:, :, 8:29, :].reshape(B, T, -1)
         lhand_input = pose_input[:, :, 29:, :].reshape(B, T, -1)
         
-        pose_emb = self.pose_emb(body_input).unsqueeze(2)   # [B, T, 1, C]
-        rhand_emb = self.rhand_emb(rhand_input).unsqueeze(2) # [B, T, 1, C]
-        lhand_emb = self.lhand_emb(lhand_input).unsqueeze(2) # [B, T, 1, C]
+        pose_emb = self.pose_emb(body_input).unsqueeze(2)   # [B, T, 1, H]
+        rhand_emb = self.rhand_emb(rhand_input).unsqueeze(2) # [B, T, 1, H]
+        lhand_emb = self.lhand_emb(lhand_input).unsqueeze(2) # [B, T, 1, H]
         
-        points_feat = torch.cat([pose_emb, rhand_emb, lhand_emb], dim=2) # [B, T, 3, C]
+        # [B, T, 3, H]
+        points_feat = torch.cat([pose_emb, rhand_emb, lhand_emb], dim=2) 
         
-        # Spatial Transformer
+        # 2. Spatial Transformer (Inter-part correlation)
+        # (B, T)를 배치 차원으로 병합하여 각 프레임별로 3개 파트 간 어텐션 수행
         points_feat = einops.rearrange(points_feat, "b t n h -> (b t) n h")
         points_feat = points_feat + self.spa_pos_emb
         points_feat = self.enc_spa_vit(points_feat, mask=None)
+        
+        # [변경] 3. Merge & Temporal Transformer
+        # 다시 (B, T, 3, H)로 복구
+        points_feat = einops.rearrange(points_feat, "(b t) n h -> b t n h", b=B, t=T)
+        
+        # (B, T, 3*H)로 Flatten 후 (B, T, H)로 Projection
+        points_feat = einops.rearrange(points_feat, "b t n h -> b t (n h)") 
+        merged_feat = self.merge_proj(points_feat) # [B, T, H]
 
-        # Temporal Transformer
-        points_feat = einops.rearrange(points_feat, "(b t) n h -> (b n) t h", b=B)
+        # Temporal PE 더하기
+        merged_feat = merged_feat + self.tem_pos_emb[:, :T, :]
+        
+        # 마스크 생성 (B, 1, 1, T) - Head 차원 고려
+        points_mask = self._get_mask(pose_length, T, device)
+        points_mask = points_mask.unsqueeze(1).unsqueeze(1) 
+        
+        # Temporal Attention 수행
+        encoded_feat = self.enc_tem_vit(merged_feat, mask=points_mask) # [B, T, H]
+        
+        return encoded_feat
+    
+    def qformer(self, encoded_feat):
+        # encoded_feat: [B, T, H]
+        B = encoded_feat.shape[0]
+        
+        # Query 확장 [B, num_tokens, H]
+        query = self.unified_query.expand(B, -1, -1)
+        
+        # Q-Former (Cross Attention: Query가 Encoded Feat를 압축)
+        # Output: [B, num_tokens, H]
+        qae_feat = self.qformer_model(encoded_feat, query, self.unified_pos_emb)
+        qae_feat, indices, commit_loss = self.quantizer(qae_feat)
+        # 여기서 VQ를 적용한다면 qae_feat를 통과시키면 됩니다.
+        return qae_feat, indices, commit_loss
+
+    def decode(self, qae_feat, pose_length):
+        # qae_feat: [B, num_tokens, H] (or Quantized)
+        B = qae_feat.shape[0]
+        T = max(pose_length)
+        device = qae_feat.device
+        
+        # 1. Temporal Decoding
+        # Decoder Token 확장 [B, T, H]
+        dec_token = repeat(self.dec_token, '() f c -> b f c', b=B)[:, :T, :]
+        
+        # Cross Attention (Decoder Token <-> Compressed Latent)
+        # qae_feat를 Key/Value로 사용
+        points_feat = dec_token + self.dec_ca(dec_token, qae_feat, qae_feat)
         points_feat = points_feat + self.tem_pos_emb[:, :T, :]
         
+        # Mask 처리
         points_mask = self._get_mask(pose_length, T, device)
-        points_mask_repeated = einops.repeat(points_mask, "b t -> (b n) 1 1 t", n=3)
-        points_feat = self.enc_tem_vit(points_feat, mask=points_mask_repeated)
+        points_mask = points_mask.unsqueeze(1).unsqueeze(1)
         
-        points_feat = einops.rearrange(points_feat, "(b n) t h -> b h t n", b=B, n=3) # [B, C, T, 3]
+        # Temporal Transformer
+        points_feat = self.dec_tem_vit(points_feat, mask=points_mask) # [B, T, H]
         
-
-        body_feat = points_feat[..., 0:1].squeeze(-1).permute(0, 2, 1).contiguous()
-        rhand_feat = points_feat[..., 1:2].squeeze(-1).permute(0, 2, 1).contiguous()
-        lhand_feat = points_feat[..., 2:3].squeeze(-1).permute(0, 2, 1).contiguous()
-        return body_feat, rhand_feat, lhand_feat
-    
-    def decode(self, quantized_feat, pose_length):
-        B, C, T, N_parts = quantized_feat.shape
-        T = max(pose_length)
-        device = quantized_feat.device
+        # [변경] 2. Split & Spatial Decoding
+        # (B, T, H) -> (B, T, 3*H) -> (B*T, 3, H)
+        points_feat = self.split_proj(points_feat)
+        points_feat = einops.rearrange(points_feat, "b t (n h) -> (b t) n h", n=3)
         
-        points_feat = einops.rearrange(quantized_feat, "b h t n -> (b t) n h")
+        # Spatial Transformer (각 파트 간 관계 복원)
         points_feat = points_feat + self.spa_pos_emb
         points_feat = self.dec_spa_vit(points_feat, mask=None)
         
-        points_feat = einops.rearrange(points_feat, "(b t) n h -> (b n) t h", b=B)
-        dec_token = repeat(self.dec_token, '() f c -> b f c', b = B*3)[:, :T, :]
-        # x_token = self.sequence_pos_encoding(x_token)
-        points_feat = dec_token + self.dec_ca(dec_token, points_feat, points_feat)
-        points_feat = points_feat + self.tem_pos_emb[:, :T, :]
+        # 3. SPL Head (Regression)
+        # (B, T, 3, H) 형태로 변환
+        rec_feat = einops.rearrange(points_feat, "(b t) n h -> b t n h", b=B, t=T)
         
-        # points_mask = self._get_mask(pose_length, T, device)
-        points_mask = self._get_mask(pose_length, T, device)
-        points_mask_repeated = einops.repeat(points_mask, "b t -> (b n) 1 1 t", n=3)
-        points_feat = self.dec_tem_vit(points_feat, mask=points_mask_repeated)
+        dec_pose_feat = rec_feat[:, :, 0, :]
+        dec_rhand_feat = rec_feat[:, :, 1, :]
+        dec_lhand_feat = rec_feat[:, :, 2, :]
         
-        rec_feat = einops.rearrange(points_feat, "(b n) t h -> (b t) n h", b=B, n=N_parts)
+        # SPL 통과 (B, T, Joints * 3)
+        dec_pose = self.pose_spl(dec_pose_feat)
+        dec_rhand = self.hand_spl(dec_rhand_feat)
+        dec_lhand = self.hand_spl(dec_lhand_feat)
         
-        dec_pose_feat = rec_feat[:, 0, :]
-        dec_rhand_feat = rec_feat[:, 1, :]
-        dec_lhand_feat = rec_feat[:, 2, :]
-        
-        dec_pose = self.pose_spl(dec_pose_feat).view(B, T, -1)
-        dec_rhand = self.hand_spl(dec_rhand_feat).view(B, T, -1)
-        dec_lhand = self.hand_spl(dec_lhand_feat).view(B, T, -1)
-        
-        # 50 joints = 8 (pose) + 21 (rhand) + 21 (lhand)
-        # Note: SPL output is (B*T, num_joints * 3). Need to reshape.
-        # SPL 내부적으로 8*3=24, 21*3=63 차원으로 나옴.
+        # 최종 병합 (B, T, 50, 3)
         reconstructed_pose = torch.cat([dec_pose, dec_rhand, dec_lhand], dim=-1).view(B, T, 50, 3)
 
         return reconstructed_pose
-
-    def qformer(self, body_feat, rhand_feat, lhand_feat):
-        B, T, C = body_feat.shape
-        device = body_feat.device
-        pose_query = self.pose_query.expand(B, -1, -1)
-        rhand_query = self.rhand_query.expand(B, -1, -1)
-        lhand_query = self.lhand_query.expand(B, -1, -1)
-        
-        body_emb = self.body_qformer(body_feat, pose_query, self.pose_pos_emb)
-        rhand_emb = self.rhand_qformer(rhand_feat, rhand_query, self.rhand_pos_emb)
-        lhand_emb = self.lhand_qformer(lhand_feat, lhand_query, self.lhand_pos_emb)
-        
-        body_emb = self.body_proj_in(body_emb)
-        body_emb, body_indices = self.body_quantizer(body_emb)
-        body_emb = self.body_proj_out(body_emb)
-        
-        rhand_emb = self.rhand_proj_in(rhand_emb)
-        rhand_emb, rhand_indices = self.rhand_quantizer(rhand_emb)
-        rhand_emb = self.rhand_proj_out(rhand_emb)
-        
-        lhand_emb = self.lhand_proj_in(lhand_emb)
-        lhand_emb, lhand_indices = self.lhand_quantizer(lhand_emb)
-        lhand_emb = self.lhand_proj_out(lhand_emb)
-        
-        qae_feat = torch.cat([body_emb.unsqueeze(-1), rhand_emb.unsqueeze(-1), lhand_emb.unsqueeze(-1)], dim=-1).permute(0, 2, 1, 3).contiguous()
-
-        return qae_feat, body_indices, rhand_indices, lhand_indices
     
     def forward(self, pose_input, text_input, pose_length):
-        B, T, N, C = pose_input.shape
-        device = pose_input.device
-
-        # Encode and Quantize
-        body_feat, rhand_feat, lhand_feat = self.encode_pose(pose_input, pose_length)
+        # 1. Encode
+        encoded_feat = self.encode_pose(pose_input, pose_length) # [B, T, H]
         
-        # Clustering
-        qae_feat, body_indices, rhand_indices, lhand_indices = self.qformer(body_feat, rhand_feat, lhand_feat)
+        # 2. Bottleneck (Q-Former + VQ if needed)
+        qae_feat, indices, commit_loss = self.qformer(encoded_feat) # [B, num_tokens, H]
         
-        # text_feat = self.encode_text(text_input, device)
-        # Decode
-        pose_decoded = self.decode(qae_feat, pose_length)
-        # Reconstruction Loss
-        # recon_loss = reconstruction_loss(pose_decoded, pose_input)
-        recon_loss = nn.L1Loss()(pose_decoded, pose_input)
+        # 3. Decode
+        pose_decoded = self.decode(qae_feat, pose_length) # [B, T, 50, 3]
         
+        # 4. Loss
         pose_input = einops.rearrange(pose_input, "b f n c -> b f (n c)")
         pose_output = einops.rearrange(pose_decoded, "b f n c -> b f (n c)")
         
         recon_loss = self.loss(pose_output, pose_input)
-        vel_loss = calculate_velocity_loss(pose_output, pose_input)
-        
 
-        return pose_decoded, recon_loss+vel_loss, body_indices, rhand_indices, lhand_indices
+        return pose_decoded, recon_loss+commit_loss.mean(), indices
