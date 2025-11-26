@@ -6,15 +6,14 @@ import argparse
 import logging
 from tqdm import tqdm
 import einops
-import time
+import types  # 메서드 패치를 위해 추가
 
-# 기존 프로젝트 모듈 임포트
+# 프로젝트 모듈 임포트
 from common.arguments import parse_args
 from dataset.data_orthus import load_data, make_data_iter
 from dataset.batch import Batch
 
-# [수정 포인트 1] 모델 Import 경로 변경
-# 기존: from model.gemma_no_diffusion import GEMMA
+# [요청하신 파일] model/gemma_nar.py에서 GEMMA 임포트
 from model.gemma_nar import GEMMA 
 
 from utils.plot_videos import plot_video, alter_DTW_timing
@@ -23,20 +22,85 @@ from common.utils import calculate_dtw
 def load_config(path):
     with open(path, 'r') as ymlfile:
         return yaml.safe_load(ymlfile)
+
+# --- [Monkey Patch] 올바른 generate 메서드 정의 ---
+@torch.no_grad()
+def correct_generate(self, text_input, diffusion_steps=50, target_length=None):
+    self.eval()
+    device = next(self.parameters()).device
     
-def create_mask(seq_lengths, device="cpu"):
-    max_len = max(seq_lengths)
-    mask = torch.arange(max_len, device=device)[None, :] < torch.tensor(seq_lengths, device=device)[:, None]
-    return mask.bool()
+    if isinstance(text_input, str):
+        text_input = [text_input]
+        
+    context_vector = self._get_text_context_vector(text_input, device)
+    B = context_vector.shape[0]
+    
+    generated_latents = []
+    
+    # Autoregressive Loop
+    for i in range(self.total_latent_tokens):
+        if len(generated_latents) == 0:
+            inputs_embeds = context_vector
+        else:
+            # (B, i, latent_dim=64)
+            prev_latents_tensor = torch.stack(generated_latents, dim=1)
+            # (B, i, gemma_hidden_size=2048)
+            latents_emb = self.latent_token_proj(prev_latents_tensor)
+            inputs_embeds = torch.cat([context_vector, latents_emb], dim=1)
+
+        L = inputs_embeds.shape[1]
+        attention_mask = torch.ones(B, L, dtype=torch.long, device=device)
+        
+        # Gemma Forward
+        outputs = self.text_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True
+        )
+        
+        # Condition for Diffusion (Last token hidden state)
+        z_cond = outputs.hidden_states[-1][:, -1, :].unsqueeze(1) 
+        
+        # Diffusion Sampling
+        # 중요: self.latent_dim (64) 크기로 노이즈 생성
+        latent_sample = torch.randn(B, 1, self.latent_dim, device=device)
+        self.train_scheduler.set_timesteps(diffusion_steps)
+        
+        for t in self.train_scheduler.timesteps:
+            timesteps_tensor = torch.full((B,), t, device=device, dtype=torch.long)
+            model_output = self.diffusion_head(latent_sample, timesteps_tensor, z_cond)
+            latent_sample = self.train_scheduler.step(
+                model_output, t, latent_sample
+            ).prev_sample
+            
+        # 결과 저장 (B, 64)
+        generated_latents.append(latent_sample.squeeze(1))
+
+    # (B, 24, 64)
+    final_latents = torch.stack(generated_latents, dim=1)
+    
+    reshaped_latent = einops.rearrange(
+        final_latents, 
+        'b (t_qae n_parts) dim -> b dim t_qae n_parts', 
+        t_qae=self.num_latent_tokens, 
+        n_parts=self.num_latent_parts
+    )
+    
+    if target_length is None:
+        target_length = torch.full((B,), 150, device=device, dtype=torch.long)
+    
+    decoded_pose = self.qae.decode(reshaped_latent, target_length)
+    
+    return decoded_pose
+# -------------------------------------------------
 
 def evaluate(args, config, dataloader, model, src_vocab):
     model.eval()
     
-    # 결과 저장 경로 설정
-    results_dir = os.path.join(args.checkpoint, "inference_results")
+    results_dir = os.path.join(os.path.dirname(args.checkpoint), "inference_results")
     os.makedirs(results_dir, exist_ok=True)
     
-    # 로깅 설정
     logging.basicConfig(
         format='%(asctime)s %(message)s', 
         datefmt='%Y/%m/%d %H:%M:%S', 
@@ -55,130 +119,107 @@ def evaluate(args, config, dataloader, model, src_vocab):
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(tqdm(dataloader)):
             
-            # 1. Batch 데이터 준비
             batch = Batch(torch_batch=batch_data,
                           pad_index=0,
                           model=model)
             
-            # Text Input (List of strings)
             text_input = batch.text
             
-            # Ground Truth Pose (B, T, 150) -> (B, T, 50, 3)
-            # batch.trg_input은 (B, T, 151)이며 마지막 1차원은 Counter입니다.
+            # GT Pose
             gt_pose_flat = batch.trg_input[:, :, :150]
             gt_pose = einops.rearrange(gt_pose_flat, "b f (n c) -> b f n c", c=3)
             
-            # GT Lengths
             pose_length = batch.trg_mask[...,0].sum(dim=-1).ravel()
             
-            # 2. Pose Generation (NAR 방식)
-            # [호환 확인 완료] 수정된 모델의 generate는 (text, steps, length)를 인자로 받습니다.
+            # Generate Pose (Patched generate call)
             generated_pose = model.generate(text_input, diffusion_steps=args.steps, target_length=pose_length)
             
-            # 3. 후처리 및 평가 준비
-            # Masking (길이에 맞게)
+            # Masking
             pose_mask = batch.trg_mask[...,0].squeeze().unsqueeze(-1).unsqueeze(-1)
             generated_pose = generated_pose.to(torch.float32) * pose_mask
             
-            # 4. Metric 계산
-            # MPJPE (Mean Per Joint Position Error)
-            # (B,)
+            # Metrics
             joint_error = torch.mean(torch.norm(generated_pose - gt_pose, dim=-1), dim=[-1, -2])
             all_mpjpe.extend(joint_error.cpu().numpy().tolist())
             
-            # DTW (Dynamic Time Warping)
             dtw_scores = calculate_dtw(gt_pose, generated_pose.cpu().detach())
             all_dtw.extend(dtw_scores)
             
-            # 5. 시각화 (Video Save) - 첫 번째 배치거나 일부 샘플만 저장
-            if batch_idx < 5: # 처음 5개 배치에 대해서만 영상 저장
-                num_samples = min(1, generated_pose.shape[0]) # 배치 당 1개씩
+            # Visualization (First 5 batches)
+            if batch_idx < 5: 
+                num_samples = min(1, generated_pose.shape[0])
                 
                 for i in range(num_samples):
                     gt_len_i = pose_length[i].item()
                     
-                    # (T, 150) 형태로 변환
                     gt_pose_np_i = gt_pose[i, :gt_len_i].reshape(-1, 150)
                     pred_pose_np_i = generated_pose[i, :gt_len_i].reshape(-1, 150)
                     
-                    # DTW 시각화를 위해 Counter(마지막 차원) 복구 (GT의 Counter 사용)
                     counter = batch.trg_input[i, :gt_len_i, 150:]
                     gt_with_counter = torch.cat((gt_pose_np_i, counter), dim=-1)
                     pred_with_counter = torch.cat((pred_pose_np_i, counter), dim=-1)
                     
-                    # DTW Timing 맞추기
-                    timing_hyp_seq, ref_seq_count, _ = alter_DTW_timing(pred_with_counter, gt_with_counter)
-                    
-                    text_str = text_input[i]
-                    # 파일명 안전하게 변환
-                    filename_str = text_str.replace(" ", "_").replace("/", "-")[:50]
-                    video_name = f"batch{batch_idx}_{i:02d}_{filename_str}.mp4"
-                    
                     try:
+                        timing_hyp_seq, ref_seq_count, _ = alter_DTW_timing(pred_with_counter, gt_with_counter)
+                        
+                        text_str = text_input[i]
+                        filename_str = text_str.replace(" ", "_").replace("/", "-")[:50]
+                        video_name = f"batch{batch_idx}_{i:02d}_{filename_str}.mp4"
+                        
                         plot_video(
                             joints=timing_hyp_seq,
                             file_path=results_dir,
                             video_name=video_name,
-                            references=ref_seq_count, # GT를 Reference로 함께 출력
+                            references=ref_seq_count,
                             skip_frames=1,
                             sequence_ID=text_str
                         )
                     except Exception as e:
-                        logging.error(f"Failed to plot video {video_name}: {e}")
+                        logging.error(f"Video plot failed: {e}")
 
-    # 최종 결과 출력
-    avg_mpjpe = np.mean(all_mpjpe) * 1000 # mm 단위 변환
+    avg_mpjpe = np.mean(all_mpjpe) * 1000
     avg_dtw = np.mean(all_dtw)
     
-    logging.info("="*30)
-    logging.info(f"Inference Completed.")
-    logging.info(f"Average MPJPE: {avg_mpjpe:.4f} mm")
-    logging.info(f"Average DTW: {avg_dtw:.4f}")
-    logging.info("="*30)
-
+    logging.info(f"Inference Finished. MPJPE: {avg_mpjpe:.4f}, DTW: {avg_dtw:.4f}")
     print(f"MPJPE: {avg_mpjpe:.4f}, DTW: {avg_dtw:.4f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/t2p_config.yaml')
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to directory or specific .pth file')
+    parser.add_argument('--checkpoint', type=str, required=True, help='Path to .pth file')
     parser.add_argument('--gpu', type=str, default='0')
-    parser.add_argument('--steps', type=int, default=50, help='Diffusion sampling steps')
+    parser.add_argument('--steps', type=int, default=50, help='Diffusion steps')
     
     args = parser.parse_args()
     
-    # Config 로드
     config = load_config(args.config)
     
-    # GPU 설정
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 1. 데이터 로드
     print("Loading data...")
     train_data, dev_data, test_data, src_vocab, trg_vocab = load_data(cfg=config)
     
-    # Test Dataloader 생성
-    batch_size = config["training"]["batch_size"]
-    test_dataloader = make_data_iter(test_data, # [주의] test_data 사용
-                                     batch_size=batch_size,
+    test_dataloader = make_data_iter(test_data,
+                                     batch_size=config["training"]["batch_size"],
                                      batch_type="sentence",
                                      train=False, 
                                      shuffle=False)
     
-    # 2. 모델 초기화
-    print("Loading model...")
+    print("Loading model (gemma_nar)...")
     model = GEMMA(config["model"]).to(device)
     
-    # 3. 체크포인트 로드
+    # [Patch] 모델 인스턴스의 generate 메서드를 올바른 함수로 교체
+    model.generate = types.MethodType(correct_generate, model)
+    
+    # Load Checkpoint
     if os.path.isdir(args.checkpoint):
         import glob
-        # 디렉토리 내에서 가장 최근에 수정된 .pth 파일 찾기
         pth_files = sorted(glob.glob(os.path.join(args.checkpoint, "*.pth")), key=os.path.getmtime)
         if pth_files:
             ckpt_path = pth_files[-1]
         else:
-            raise FileNotFoundError(f"No .pth files found in {args.checkpoint}")
+            raise FileNotFoundError(f"No .pth found in {args.checkpoint}")
     else:
         ckpt_path = args.checkpoint
         
@@ -186,15 +227,13 @@ if __name__ == "__main__":
     checkpoint = torch.load(ckpt_path, map_location=device)
     
     if 'model' in checkpoint:
-        # DataParallel 등으로 저장되어 key에 'module.'이 붙어있을 경우 처리
         state_dict = checkpoint['model']
         new_state_dict = {}
         for k, v in state_dict.items():
             name = k.replace("module.", "") 
             new_state_dict[name] = v
-        model.load_state_dict(new_state_dict)
+        model.load_state_dict(new_state_dict, strict=False)
     else:
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=False)
         
-    # 4. 평가 실행
     evaluate(args, config, test_dataloader, model, src_vocab)

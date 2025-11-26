@@ -70,10 +70,8 @@ model:
     depth: 1 # Number of layers
     num_heads: 8  # Number of Heads
     num_tokens: 8 # Number of Tokens for Qformer
-    hidden_size: 64 # Hidden Size Dimension
-    ff_size: 64 # Feed-forward dimension (4 x hidden_size)
-    # hidden_size: 768 # Hidden Size Dimension
-    # ff_size: 768 # Feed-forward dimension (4 x hidden_size)
+    hidden_size: 128 # Hidden Size Dimension
+    ff_size: 128 # Feed-forward dimension (4 x hidden_size)
     dropout: 0.1 # Encoder Dropout
     drop_rate: 0.1
     drop_path_rate: 0.1
