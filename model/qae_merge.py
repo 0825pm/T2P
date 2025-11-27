@@ -237,6 +237,8 @@ class QAE(nn.Module):
                                      depth=depth,
                                      num_heads=num_heads)
         
+        self.bottleneck_norm = nn.LayerNorm(embed_dim)
+        
         # [참고] VQAE라면 여기에 ResidualLFQ 등의 양자화 모듈이 1개만 들어갑니다.
 
         # 4. 디코더
@@ -314,7 +316,7 @@ class QAE(nn.Module):
         # Q-Former (Cross Attention: Query가 Encoded Feat를 압축)
         # Output: [B, num_tokens, H]
         qae_feat = self.qformer_model(encoded_feat, query, self.unified_pos_emb)
-        
+        qae_feat = self.bottleneck_norm(qae_feat)
         # 여기서 VQ를 적용한다면 qae_feat를 통과시키면 됩니다.
         return qae_feat
 

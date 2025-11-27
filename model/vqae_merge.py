@@ -237,6 +237,7 @@ class QAE(nn.Module):
                                      depth=depth,
                                      num_heads=num_heads)
         self.quant_norm = nn.LayerNorm(embed_dim)
+        self.pre_quant_scale = nn.Parameter(torch.tensor(0.1))
         self.quantizer = FSQ(
             levels=[5, 5, 5, 5], 
             dim=embed_dim,         # 입력 차원 (예: 256 or 512)
@@ -319,8 +320,9 @@ class QAE(nn.Module):
         # Output: [B, num_tokens, H]
         qae_feat = self.qformer_model(encoded_feat, query, self.unified_pos_emb)
         qae_feat = self.quant_norm(qae_feat)
+        qae_feat = qae_feat * self.pre_quant_scale
         qae_feat, indices = self.quantizer(qae_feat)
-        # 여기서 VQ를 적용한다면 qae_feat를 통과시키면 됩니다.
+    
         return qae_feat, indices
 
     def decode(self, qae_feat, pose_length):

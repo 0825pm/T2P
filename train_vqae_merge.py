@@ -152,7 +152,6 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun, teache
             # Teacher의 qformer까지만 통과시키는 로직이 필요.
             # 편의상 동일한 forward를 쓰되 반환된 raw feature를 사용
             _, _, teacher_feat = teacher_model(pose_input, text_input, pose_length)
-        
         # MSE Loss (Student Raw Feature <-> Teacher Raw Feature)
         distill_loss = F.mse_loss(student_feat, teacher_feat)
         

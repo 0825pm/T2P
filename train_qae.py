@@ -64,7 +64,7 @@ def save_videos(config, dataloader, model, epoch, checkpoint_dir, src_vocab, num
     num_samples = min(num_samples, pose_input.shape[0])
     print(f"Saving {num_samples} seq2seq sampling videos...")
     
-    pose_output, recon_loss = model(pose_input, text_input, pose_length)
+    pose_output, _, _ = model(pose_input, text_input, pose_length)
     
     for i in range(num_samples):
         gt_len_i = pose_length[i].item()
@@ -115,7 +115,7 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         
         text_input = [" ".join([src_vocab.itos[batch.src[i][j]] for j in range(len(batch.src[i])-1)]) for i in range(len(batch.src))]
         
-        pose_output, recon_loss = model(pose_input, text_input, pose_length)
+        pose_output, recon_loss, _ = model(pose_input, text_input, pose_length)
         total_loss = recon_loss
         total_loss.backward()
         
@@ -165,7 +165,7 @@ def test(config, dataloader, model, src_vocab):
         
         text_input = [" ".join([src_vocab.itos[batch.src[i][j]] for j in range(len(batch.src[i])-1)]) for i in range(len(batch.src))]
         
-        pose_output, recon_loss = model(pose_input, text_input, pose_length)
+        pose_output, recon_loss, _ = model(pose_input, text_input, pose_length)
         total_loss = recon_loss
         
         pose_output = pose_output.to(torch.float32) * pose_mask
