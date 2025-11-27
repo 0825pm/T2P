@@ -383,4 +383,4 @@ class QAE(nn.Module):
         
         recon_loss = self.loss(pose_output, pose_input)
 
-        return pose_decoded, recon_loss
+        return pose_decoded, recon_loss, qae_feat

@@ -7,7 +7,7 @@ import einops
 
 from model.qformer import QFormer
 from common.loss import Loss
-from vector_quantize_pytorch import ResidualFSQ, LatentQuantize, ResidualVQ
+from model.vq.FSQ import FSQ
 
 
 class BertLayerNorm(nn.Module):
@@ -236,16 +236,13 @@ class QAE(nn.Module):
                                      drop_rate=config['drop_rate'],
                                      depth=depth,
                                      num_heads=num_heads)
-        
-        self.quantizer = ResidualVQ(
-            dim = embed_dim,
-            num_quantizers = 4,
-            codebook_size = 1024,
-            stochastic_sample_codes = True,
-            sample_codebook_temp = 0.1,         # temperature for stochastically sampling codes, 0 would be equivalent to non-stochastic
-            shared_codebook = True              # whether to share the codebooks for all quantizers or not
+        self.quant_norm = nn.LayerNorm(embed_dim)
+        self.quantizer = FSQ(
+            levels=[5, 5, 5, 5], 
+            dim=embed_dim,         # 입력 차원 (예: 256 or 512)
+            num_codebooks=1        # 보통 1개 사용
         )
-
+        
         # 4. 디코더
         # Temporal Transformer (1개의 시퀀스 처리)
         self.dec_tem_vit = Encoder(dim=embed_dim, depth=depth, heads=num_heads, mlp_dim=mlp_dim, dropout=0.1)
@@ -321,9 +318,10 @@ class QAE(nn.Module):
         # Q-Former (Cross Attention: Query가 Encoded Feat를 압축)
         # Output: [B, num_tokens, H]
         qae_feat = self.qformer_model(encoded_feat, query, self.unified_pos_emb)
-        qae_feat, indices, commit_loss = self.quantizer(qae_feat)
+        qae_feat = self.quant_norm(qae_feat)
+        qae_feat, indices = self.quantizer(qae_feat)
         # 여기서 VQ를 적용한다면 qae_feat를 통과시키면 됩니다.
-        return qae_feat, indices, commit_loss
+        return qae_feat, indices
 
     def decode(self, qae_feat, pose_length):
         # qae_feat: [B, num_tokens, H] (or Quantized)
@@ -379,7 +377,7 @@ class QAE(nn.Module):
         encoded_feat = self.encode_pose(pose_input, pose_length) # [B, T, H]
         
         # 2. Bottleneck (Q-Former + VQ if needed)
-        qae_feat, indices, commit_loss = self.qformer(encoded_feat) # [B, num_tokens, H]
+        qae_feat, indices = self.qformer(encoded_feat) # [B, num_tokens, H]
         
         # 3. Decode
         pose_decoded = self.decode(qae_feat, pose_length) # [B, T, 50, 3]
@@ -390,4 +388,4 @@ class QAE(nn.Module):
         
         recon_loss = self.loss(pose_output, pose_input)
 
-        return pose_decoded, recon_loss+commit_loss.mean(), indices
+        return pose_decoded, recon_loss, indices, qae_feat
