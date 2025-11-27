@@ -102,7 +102,15 @@ class FSQ(Module):
 
         self.allowed_dtypes = allowed_dtypes
         self.force_quantization_f32 = force_quantization_f32
+        
+        self._init_weights()
 
+    def _init_weights(self):
+        if hasattr(self, 'project_in') and isinstance(self.project_in, nn.Linear):
+            nn.init.orthogonal_(self.project_in.weight)
+        if hasattr(self, 'project_out') and isinstance(self.project_out, nn.Linear):
+            nn.init.orthogonal_(self.project_out.weight)
+    
     def bound(self, z, eps: float = 1e-3):
         """ Bound `z`, an array of shape (..., d). """
         half_l = (self._levels - 1) * (1 + eps) / 2
