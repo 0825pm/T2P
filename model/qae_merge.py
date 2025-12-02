@@ -317,6 +317,7 @@ class QAE(nn.Module):
         # Output: [B, num_tokens, H]
         qae_feat = self.qformer_model(encoded_feat, query, self.unified_pos_emb)
         qae_feat = self.bottleneck_norm(qae_feat)
+        qae_feat = torch.tanh(qae_feat)
         # 여기서 VQ를 적용한다면 qae_feat를 통과시키면 됩니다.
         return qae_feat
 

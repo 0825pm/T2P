@@ -101,10 +101,11 @@ def get_stats_str(name, counter):
             f"Min Freq: {min(counts)}, Max Freq: {max(counts)}, "
             f"Avg Freq: {sum(counts)/len(counts):.1f}")
 
-def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
+def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun, teacher_model, distill_weight=0):
     
     loss_all = {"total_loss": AccumLoss(),
                 "recon_loss": AccumLoss(),
+                "distill_loss": AccumLoss(),
                 }
     
     all_dtw_pose = list()
@@ -115,6 +116,8 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
     quantizer_counters = [Counter() for _ in range(num_codebook_dims)]
     
     model.train()
+    if teacher_model:
+        teacher_model.eval()
 
     for i, batch in enumerate(tqdm(dataloader)):
         optimizer.zero_grad()
@@ -141,8 +144,21 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
                 # 해당 차원(d)의 모든 인덱스 카운트
                 dim_indices = level_indices_np[..., d].flatten()
                 quantizer_counters[d].update(dim_indices)
+            
+        distill_loss_val = 0.0
+        with torch.no_grad():
+            # Teacher는 quantization 없이 raw feature만 필요
+            # Teacher의 forward를 호출하되, return_raw=True로 가정하거나
+            # Teacher의 qformer까지만 통과시키는 로직이 필요.
+            # 편의상 동일한 forward를 쓰되 반환된 raw feature를 사용
+            _, _, teacher_feat = teacher_model(pose_input, text_input, pose_length)
+        # MSE Loss (Student Raw Feature <-> Teacher Raw Feature)
+        distill_loss = F.mse_loss(student_feat, teacher_feat)
         
-        total_loss = recon_loss
+        # 가중치 적용 (config에서 불러오거나 하드코딩)
+        distill_loss_val = distill_loss.item()
+        
+        total_loss = recon_loss + distill_weight * distill_loss
         total_loss.backward()
         
         if clip_grad_fun is not None:
@@ -151,6 +167,7 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         
         optimizer.step()
 
+        
         pose_output = pose_output.to(torch.float32) * pose_mask
         joint_error_pose = torch.mean(torch.norm(pose_output - pose_input, dim=len(pose_input.shape)-1))
         dtw_score_pose = calculate_dtw(pose_input, pose_output.cpu().detach())
@@ -161,6 +178,7 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         N = pose_input.shape[0]
         loss_all["total_loss"].update(total_loss.detach().cpu().numpy() * N, N)
         loss_all["recon_loss"].update(recon_loss.detach().cpu().numpy() * N, N)
+        loss_all["distill_loss"].update(distill_loss_val * N, N)
     
     log_msg = "\n[TRAIN Epoch FSQ Stats]\n"
     for d in range(num_codebook_dims):
@@ -178,13 +196,15 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
     
     return loss_all["total_loss"].avg, \
             loss_all["recon_loss"].avg, \
+            loss_all["distill_loss"].avg, \
             np.mean(np.array(all_mpjpe_pose)) * 1000, np.mean(all_dtw_pose)
 
 @torch.no_grad()
-def test(config, dataloader, model, src_vocab):
+def test(config, dataloader, model, src_vocab, teacher_model):
     
     loss_all = {"total_loss": AccumLoss(),
                 "recon_loss": AccumLoss(),
+                "distill_loss": AccumLoss(),
                 }
     
     all_dtw_pose = list()
@@ -195,6 +215,8 @@ def test(config, dataloader, model, src_vocab):
     quantizer_counters = [Counter() for _ in range(num_codebook_dims)]
     
     model.eval()
+    if teacher_model:
+        teacher_model.eval()
 
     for i, batch in enumerate(tqdm(dataloader)):
         
@@ -221,7 +243,23 @@ def test(config, dataloader, model, src_vocab):
                 dim_indices = level_indices_np[..., d].flatten()
                 quantizer_counters[d].update(dim_indices)
         
-        total_loss = recon_loss
+        distill_loss_val = 0.0
+        
+        with torch.no_grad():
+            # Teacher는 quantization 없이 raw feature만 필요
+            # Teacher의 forward를 호출하되, return_raw=True로 가정하거나
+            # Teacher의 qformer까지만 통과시키는 로직이 필요.
+            # 편의상 동일한 forward를 쓰되 반환된 raw feature를 사용
+            _, _, teacher_feat = teacher_model(pose_input, text_input, pose_length)
+        
+        # MSE Loss (Student Raw Feature <-> Teacher Raw Feature)
+        distill_loss = F.mse_loss(student_feat, teacher_feat)
+        
+        # 가중치 적용 (config에서 불러오거나 하드코딩)
+        distill_weight = config.get('distill_loss_weight', 1.0) 
+        distill_loss_val = distill_loss.item()
+        
+        total_loss = recon_loss + distill_weight * distill_loss
     
         pose_output = pose_output.to(torch.float32) * pose_mask
         joint_error_pose = torch.mean(torch.norm(pose_output - pose_input, dim=len(pose_input.shape)-1))
@@ -233,6 +271,7 @@ def test(config, dataloader, model, src_vocab):
         N = pose_input.shape[0]
         loss_all["total_loss"].update(total_loss.detach().cpu().numpy() * N, N)
         loss_all["recon_loss"].update(recon_loss.detach().cpu().numpy() * N, N)
+        loss_all["distill_loss"].update(distill_loss_val * N, N)
     
     log_msg = "\n[TEST Epoch FSQ Stats]\n"
     for d in range(num_codebook_dims):
@@ -250,6 +289,7 @@ def test(config, dataloader, model, src_vocab):
     
     return loss_all["total_loss"].avg, \
             loss_all["recon_loss"].avg, \
+            loss_all["distill_loss"].avg, \
             np.mean(np.array(all_mpjpe_pose)) * 1000, np.mean(all_dtw_pose)
             
 if __name__ == "__main__":
@@ -281,21 +321,90 @@ if __name__ == "__main__":
     lr = float(train_config["learning_rate"])
     
     model = QAE(model_config).cuda()
+    teacher_model = Teacher_QAE(model_config).cuda()
     
     if args.previous_dir != "":
         Load_model(args, model)
-       
+        # print(f"\n[Info] Loading pretrained weights from {args.previous_dir}...")
+        
+        # # 1. 체크포인트 불러오기
+        # checkpoint_path = os.path.join(args.previous_dir, "model_best.pth") # 또는 last.pth 등 지정
+        # if not os.path.exists(checkpoint_path):
+        #     # 파일명을 못 찾을 경우를 대비해 폴더 내 검색 (기존 Load_model 로직 흉내)
+        #     import glob
+        #     pth_files = glob.glob(os.path.join(args.previous_dir, "*.pth"))
+        #     if len(pth_files) > 0:
+        #         checkpoint_path = pth_files[0]
+        #     else:
+        #         raise FileNotFoundError(f"No checkpoint found in {args.previous_dir}")
+        
+        # checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        # # 2. Decoder 관련 키(Key) 제거 (초기화 상태 유지)
+        # #    'dec_', 'split_proj', 'spl' 등이 포함된 키를 제외합니다.
+        # model_dict = model.state_dict()
+        # pretrained_dict = {k: v for k, v in checkpoint.items() if k in model_dict}
+        
+        # # 제외할 키워드 리스트
+        # decoder_keywords = ["dec_", "split_proj", "pose_spl", "hand_spl"]
+        
+        # filtered_dict = {}
+        # for k, v in pretrained_dict.items():
+        #     is_decoder = any(keyword in k for keyword in decoder_keywords)
+        #     if not is_decoder:
+        #         filtered_dict[k] = v
+        #     else:
+        #         print(f"Skipping decoder weight: {k}") # 확인용 로그
+
+        # # 3. 필터링된 가중치 로드 (strict=False 필수)
+        # model.load_state_dict(filtered_dict, strict=False)
+        
+        Load_model(args, teacher_model)
+    
+    teacher_model.eval()
+    for p in teacher_model.parameters(): p.requires_grad = False
+    
     # clip_grad_fun = build_gradient_clipper(config=train_config)
     # optimizer = build_optimizer(config=train_config, parameters=model.parameters())
     clip_grad_fun = None
-    param_groups = [
-            {"params": model.parameters(), "lr": lr, "weight_decay": 0.01},]
+
     
-    optimizer = optim.AdamW([{'params' : model.parameters()},
-                             ],
-                            lr=lr, weight_decay=0.01)
-    scheduler_args = Namespace(**config['training'])
-    scheduler, _ = create_scheduler(scheduler_args, optimizer)
+    # param_groups = [
+    #     {"params": model.parameters(), "lr": lr, "weight_decay": 0.01},]
+    
+    # optimizer = optim.AdamW([{'params' : model.parameters()},
+    #                          ],
+    #                         lr=lr, weight_decay=0.01)
+    # scheduler_args = Namespace(**config['training'])
+    # scheduler, _ = create_scheduler(scheduler_args, optimizer)
+    
+    # --- Phase 1: Warmup (Decoder Freeze) ---
+    print("\n=== Phase 1: Warmup (Aligning FSQ) ===")
+    
+    # Decoder Freeze
+    for name, param in model.named_parameters():
+        if "dec_" in name or "spl" in name or "split_proj" in name:
+            param.requires_grad = False
+    
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=float(config["training"]["learning_rate"]))
+    
+    warmup_epochs = 30
+    for epoch in range(1, warmup_epochs + 1):
+        # Warmup 때는 Distill Loss 가중치를 높게 (예: 10.0)
+        t_loss, r_loss, d_loss, mpjpe_train, dtw_train = train(config, train_dataloader, model, src_vocab, optimizer, clip_grad_fun, teacher_model, distill_weight=1)
+        print(f"Warmup Epoch {epoch}: Total {t_loss:.4f} | Recon {r_loss:.4f} | Distill {d_loss:.4f}")
+
+    # --- Phase 2: Fine-tuning (Unfreeze All) ---
+    print("\n=== Phase 2: Fine-tuning (Full Training) ===")
+    
+    # Unfreeze All
+    for param in model.parameters(): param.requires_grad = True
+    
+    # LR 낮춰서 재설정
+    optimizer = optim.AdamW(model.parameters(), lr=float(config["training"]["learning_rate"]) * 0.1)
+    scheduler, _ = create_scheduler(Namespace(**config['training']), optimizer)
+    
+    # loss_scaler = NativeScaler()
         
     best_epoch = 0
     epoch = train_config["epochs"]
@@ -306,11 +415,11 @@ if __name__ == "__main__":
         #     total_loss_test, recon_loss_test, kl_loss_test, contra_loss_test, len_loss_test, latent_loss_test, mpjpe_pose_test, dtw_pose_test, mpjpe_text_test, dtw_text_test, test_idx = test(config, test_dataloader, model, epoch)
         
         if args.train: 
-            total_loss_train, recon_loss_train, mpjpe_train, dtw_train = train(config, train_dataloader, model, src_vocab, optimizer, clip_grad_fun)
+            total_loss_train, recon_loss_train, distil_loss_train, mpjpe_train, dtw_train = train(config, train_dataloader, model, src_vocab, optimizer, clip_grad_fun, teacher_model)
             loss_epochs.append(total_loss_train * 1000)
             scheduler.step(epoch)
         with torch.no_grad():
-            total_loss_test, recon_loss_test, mpjpe_test, dtw_test = test(config, test_dataloader, model, src_vocab)
+            total_loss_test, recon_loss_test, distil_loss_test, mpjpe_test, dtw_test = test(config, test_dataloader, model, src_vocab, teacher_model)
 
         is_best = mpjpe_test < args.previous_best and dtw_test < args.previous_best_dtw
         if args.train and is_best:
@@ -333,11 +442,11 @@ if __name__ == "__main__":
             )
 
         if args.train:
-            logging.info("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
-            logging.info("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
+            logging.info("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, distil: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, distil_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
+            logging.info("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, distil: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, distil_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
 
-            print("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
-            print("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
+            print("epoch: %d, lr: %.6f, TRAIN : total: %.4f, recon: %.4f, distil: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_train, recon_loss_train, distil_loss_train, mpjpe_train, dtw_train, best_epoch, args.previous_best, args.previous_best_dtw))
+            print("epoch: %d, lr: %.6f, TEST : total: %.4f, recon: %.4f, distil: %.4f, mpjpe: %.4f, dtw: %.4f, %d: %.4f, %.4f" % (epoch, lr, total_loss_test, recon_loss_test, distil_loss_test, mpjpe_test, dtw_test, best_epoch, args.previous_best, args.previous_best_dtw))
         
             if epoch % args.lr_decay_epoch == 0:
                 lr *= args.lr_decay_large
