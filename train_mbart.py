@@ -231,7 +231,14 @@ if __name__ == "__main__":
     
     if args.previous_dir != "":
         Load_model(args, model.qae)
-        
+    
+    # print("Freezing mBART Encoder & Embeddings...")
+    # # mBART의 Encoder와 공유 임베딩 동결
+    # for param in model.mbart.get_encoder().parameters():
+    #     param.requires_grad = False
+    # for param in model.mbart.shared.parameters():
+    #     param.requires_grad = False
+    
     # clip_grad_fun = build_gradient_clipper(config=train_config)
     # optimizer = build_optimizer(config=train_config, parameters=model.parameters())
     clip_grad_fun = None
@@ -240,9 +247,12 @@ if __name__ == "__main__":
     param_groups = [
         {"params": model.parameters(), "lr": lr, "weight_decay": 0.01},]
     
-    optimizer = optim.AdamW([{'params' : model.parameters()},
-                             ],
-                            lr=lr, weight_decay=0.01)
+    # optimizer = optim.AdamW([{'params' : model.parameters()},
+    #                          ],
+    #                         lr=lr, weight_decay=0.01)
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
+                        lr=float(config["training"]["learning_rate"]), 
+                        weight_decay=0.05)
     scheduler_args = Namespace(**config['training'])
     scheduler, _ = create_scheduler(scheduler_args, optimizer)
         
