@@ -237,6 +237,16 @@ class QAE(nn.Module):
                                      depth=depth,
                                      num_heads=num_heads)
         
+        self.bottleneck_conv = nn.Sequential(
+            # 채널 수는 그대로 유지 (embed_dim -> embed_dim)
+            nn.Conv1d(in_channels=embed_dim, out_channels=embed_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            # [핵심] 입력 길이 T가 얼마든 num_tokens 길이로 강제 변환
+            nn.AdaptiveAvgPool1d(self.num_tokens) 
+        )
+        
+        self.bottleneck_norm = nn.LayerNorm(embed_dim)
+        
         self.bottleneck_norm = nn.LayerNorm(embed_dim)
         
         # [참고] VQAE라면 여기에 ResidualLFQ 등의 양자화 모듈이 1개만 들어갑니다.
@@ -306,21 +316,39 @@ class QAE(nn.Module):
         
         return encoded_feat
     
+    # def qformer(self, encoded_feat):
+    #     # encoded_feat: [B, T, H]
+    #     B = encoded_feat.shape[0]
+        
+    #     # Query 확장 [B, num_tokens, H]
+    #     query = self.unified_query.expand(B, -1, -1)
+        
+    #     # Q-Former (Cross Attention: Query가 Encoded Feat를 압축)
+    #     # Output: [B, num_tokens, H]
+    #     qae_feat = self.qformer_model(encoded_feat, query, self.unified_pos_emb)
+    #     qae_feat = self.bottleneck_norm(qae_feat)
+    #     qae_feat = torch.tanh(qae_feat)
+    #     # 여기서 VQ를 적용한다면 qae_feat를 통과시키면 됩니다.
+    #     return qae_feat
+
     def qformer(self, encoded_feat):
         # encoded_feat: [B, T, H]
-        B = encoded_feat.shape[0]
         
-        # Query 확장 [B, num_tokens, H]
-        query = self.unified_query.expand(B, -1, -1)
+        # Conv1d는 [B, Channel, Length] 입력을 받으므로 차원 변경
+        x = encoded_feat.transpose(1, 2)  # [B, H, T]
         
-        # Q-Former (Cross Attention: Query가 Encoded Feat를 압축)
-        # Output: [B, num_tokens, H]
-        qae_feat = self.qformer_model(encoded_feat, query, self.unified_pos_emb)
+        # Conv + Pooling 통과 -> [B, H, num_tokens]
+        x = self.bottleneck_conv(x)
+        
+        # 다시 원래 형태 [B, num_tokens, H]로 복구
+        qae_feat = x.transpose(1, 2)
+        
+        # Norm & Activation (기존 유지)
         qae_feat = self.bottleneck_norm(qae_feat)
         qae_feat = torch.tanh(qae_feat)
-        # 여기서 VQ를 적용한다면 qae_feat를 통과시키면 됩니다.
+        
         return qae_feat
-
+    
     def decode(self, qae_feat, pose_length):
         # qae_feat: [B, num_tokens, H] (or Quantized)
         B = qae_feat.shape[0]

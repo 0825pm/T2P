@@ -239,9 +239,14 @@ class QAE(nn.Module):
         self.quant_norm = nn.LayerNorm(embed_dim)
         self.pre_quant_scale = nn.Parameter(torch.tensor(1.0))
         self.quantizer = FSQ(
-            levels=[8, 8, 8, 8], 
+            levels=[5, 5, 5, 5], 
             dim=embed_dim,         # 입력 차원 (예: 256 or 512)
             num_codebooks=1        # 보통 1개 사용
+        )
+        
+        self.bottleneck_conv = nn.Sequential(
+            nn.Conv1d(in_channels=embed_dim, out_channels=embed_dim, kernel_size=3, padding=1),
+            nn.GELU(),
         )
         
         # 4. 디코더
@@ -319,10 +324,14 @@ class QAE(nn.Module):
         # Q-Former (Cross Attention: Query가 Encoded Feat를 압축)
         # Output: [B, num_tokens, H]
         qae_feat = self.qformer_model(encoded_feat, query, self.unified_pos_emb)
-        qae_feat = self.quant_norm(qae_feat)
-        qae_feat = torch.tanh(qae_feat)
-        qae_feat = qae_feat * self.pre_quant_scale
+        qae_feat = self.quant_norm(encoded_feat)
+        # qae_feat = torch.tanh(qae_feat)
+        # qae_feat = qae_feat * self.pre_quant_scale
         qae_feat, indices = self.quantizer(qae_feat)
+        x = qae_feat.transpose(1, 2)
+        x = self.bottleneck_conv(x)
+        # 다시 원래 형태 [B, num_tokens, H]로 복구
+        qae_feat = x.transpose(1, 2)
     
         return qae_feat, indices
 

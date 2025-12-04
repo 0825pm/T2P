@@ -18,7 +18,7 @@ training:
   pretrain: True
   random_seed: 1126   # Random seed for initialisation
   optimizer: "adam"   # Chosen optimiser (adam, ..)
-  learning_rate: 0.0001   # Initial model learning rate
+  learning_rate: 0.001   # Initial model learning rate
   learning_rate_min: 0.0002 # Learning rate minimum, when training will stop
   weight_decay: 0.0   # Weight Decay
   clip_grad_norm: 5.0   # Gradient clipping value

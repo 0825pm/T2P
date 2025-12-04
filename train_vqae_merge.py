@@ -110,8 +110,9 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
     all_dtw_pose = list()
     all_mpjpe_pose = list()
     
-    fsq_levels = model.quantizer._levels
-    num_codebook_dims = len(fsq_levels)
+    # fsq_levels = model.quantizer._levels
+    # num_codebook_dims = len(fsq_levels)
+    num_codebook_dims = 1
     quantizer_counters = [Counter() for _ in range(num_codebook_dims)]
     
     model.train()
@@ -134,8 +135,8 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         
         with torch.no_grad():
             # combined indices를 각 차원의 레벨 인덱스로 변환
-            level_indices = model.quantizer.indices_to_level_indices(indices)
-            level_indices_np = level_indices.detach().cpu().numpy()
+            # level_indices = model.quantizer.indices_to_level_indices(indices)
+            level_indices_np = indices.detach().cpu().numpy()
             
             for d in range(num_codebook_dims):
                 # 해당 차원(d)의 모든 인덱스 카운트
@@ -167,7 +168,7 @@ def train(config, dataloader, model, src_vocab, optimizer, clip_grad_fun):
         # 각 차원별 사용된 레벨 분포 출력
         # 예: Level 0: 50%, Level 1: 20% ...
         total_count = sum(quantizer_counters[d].values())
-        log_msg += f"Dim {d} (Size {fsq_levels[d]}): "
+        # log_msg += f"Dim {d} (Size {fsq_levels[d]}): "
         sorted_keys = sorted(quantizer_counters[d].keys())
         for k in sorted_keys:
             count = quantizer_counters[d][k]
@@ -190,8 +191,9 @@ def test(config, dataloader, model, src_vocab):
     all_dtw_pose = list()
     all_mpjpe_pose = list()
     
-    fsq_levels = model.quantizer._levels
-    num_codebook_dims = len(fsq_levels)
+    # fsq_levels = model.quantizer._levels
+    # num_codebook_dims = len(fsq_levels)
+    num_codebook_dims = 1
     quantizer_counters = [Counter() for _ in range(num_codebook_dims)]
     
     model.eval()
@@ -213,8 +215,8 @@ def test(config, dataloader, model, src_vocab):
         
         with torch.no_grad():
             # combined indices를 각 차원의 레벨 인덱스로 변환
-            level_indices = model.quantizer.indices_to_level_indices(indices)
-            level_indices_np = level_indices.detach().cpu().numpy()
+            # level_indices = model.quantizer.indices_to_level_indices(indices)
+            level_indices_np = indices.detach().cpu().numpy()
             
             for d in range(num_codebook_dims):
                 # 해당 차원(d)의 모든 인덱스 카운트
@@ -239,7 +241,7 @@ def test(config, dataloader, model, src_vocab):
         # 각 차원별 사용된 레벨 분포 출력
         # 예: Level 0: 50%, Level 1: 20% ...
         total_count = sum(quantizer_counters[d].values())
-        log_msg += f"Dim {d} (Size {fsq_levels[d]}): "
+        # log_msg += f"Dim {d} (Size {fsq_levels[d]}): "
         sorted_keys = sorted(quantizer_counters[d].keys())
         for k in sorted_keys:
             count = quantizer_counters[d][k]
