@@ -35,7 +35,7 @@ from einops import rearrange
 from utils.plot_videos import plot_video, alter_DTW_timing
 from utils.builders import build_gradient_clipper, build_optimizer, build_scheduler
 # from dataset.data_gan import load_data, make_data_iter
-from dataset.data_orthus import load_data, make_data_iter
+from dataset.data_condition import load_data, make_data_iter
 from dataset.batch import Batch
 from torchtext.data import Dataset
 
@@ -62,6 +62,7 @@ def save_videos(config, dataloader, model, epoch, checkpoint_dir, src_vocab, num
     
     text_input = batch.text
     cond_input = batch.cond
+    code_input = batch.code
     
     num_samples = min(num_samples, pose_input.shape[0])
     print(f"Saving {num_samples} seq2seq sampling videos...")

@@ -15,6 +15,7 @@ class Batch:
         self.ntokens = None
         self.latent = None
         self.cond = None
+        self.code = None
         self.text = None
         self.file_paths = torch_batch.file_paths
         self.use_cuda = model.use_cuda
@@ -46,6 +47,9 @@ class Batch:
         if hasattr(torch_batch, "cond"):
             self.cond = torch_batch.cond.clone()
             
+        if hasattr(torch_batch, "code"):
+            self.code = torch_batch.code.clone()
+            
         if hasattr(torch_batch, "text"):
             self.text = torch_batch.text
 
@@ -72,3 +76,6 @@ class Batch:
             
         if self.cond is not None:
             self.cond = self.cond.cuda()
+            
+        if self.codew is not None:
+            self.codew = self.code.cuda()
