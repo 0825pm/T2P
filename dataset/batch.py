@@ -77,5 +77,5 @@ class Batch:
         if self.cond is not None:
             self.cond = self.cond.cuda()
             
-        if self.codew is not None:
-            self.codew = self.code.cuda()
+        if self.code is not None:
+            self.code = self.code.cuda()
