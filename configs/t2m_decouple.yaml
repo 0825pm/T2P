@@ -1,0 +1,59 @@
+# Text-to-Motion Training Configuration
+
+name: T2M_Decouple
+
+data:
+    src: "text"
+    trg: "skels"
+    files: "files"
+    
+    train: "/home/user/Projects/Data/new_phoenix/train"
+    dev: "/home/user/Projects/Data/new_phoenix/dev"
+    test: "/home/user/Projects/Data/new_phoenix/test"
+    
+    # Motion codes directory (from get_motion_code.py)
+    code_dir: "Data/motion_codes_decouple"
+    
+    max_motion_length: 300
+    min_motion_length: 10
+    unit_length: 4
+    framerate: 25.0
+
+training:
+    batch_size: 32
+    epochs: 150
+    learning_rate: 2e-4
+    learning_rate_min: 1e-6
+    weight_decay: 0.01
+    clip_grad_norm: 5.0
+    validation_freq: 1
+    logging_freq: 100
+    workers: 4
+    model_dir: "experiments/t2m"
+
+model:
+    type: "vqvae_decouple"
+    trg_size: 150
+    
+    # Language Model
+    lm_model_path: "facebook/mbart-large-cc25"
+    lm_model_type: "mbart_multi"
+    
+    # Codebook sizes (must match VQ-VAE)
+    body_code_num: 96
+    hand_code_num: 192
+    rhand_code_num: 192
+    
+    # Temporal downsampling
+    down_t: 2
+    
+    # Output heads
+    num_heads: 3
+    
+    # Sequence length
+    max_length: 256
+
+loss:
+    lambda_body: 1.0
+    lambda_hand: 1.0
+    lambda_rhand: 1.0

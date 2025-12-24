@@ -1,0 +1,50 @@
+# Decoupled VQ-VAE Configuration
+
+name: vqvae_decouple
+
+data:
+    train: "/home/user/Projects/Data/new_phoenix/train"
+    dev: "/home/user/Projects/Data/new_phoenix/dev"
+    test: "/home/user/Projects/Data/new_phoenix/test"
+    skip_frames: 1
+    window_size: 64
+    min_motion_len: 20
+    max_motion_len: 300
+
+training:
+    batch_size: 128
+    epochs: 200
+    learning_rate: 2e-4
+    workers: 8
+    model_dir: "experiments/vae"
+
+model:
+    type: "vqvae_decouple"
+    trg_size: 150
+    
+    vqvae:
+        nfeats: 150
+        code_num: 96          # Body codebook
+        hand_code_num: 192    # Hand codebook
+        code_dim: 512
+        down_t: 2             # 4x downsampling (SOKE style)
+        stride_t: 2
+        width: 512
+        depth: 3
+        dilation_growth_rate: 3
+        mu: 0.99
+        # Joint indices (SMPL-X)
+        body_start: 0
+        body_end: 30
+        lhand_start: 30
+        lhand_end: 75
+        rhand_start: 75
+        rhand_end: 120
+        other_start: 120
+        other_end: 150
+
+loss:
+    lambda_rec: 1.0
+    lambda_velocity: 0.5
+    lambda_commit: 0.02
+    recons_loss: "l1_smooth"
