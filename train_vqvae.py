@@ -369,7 +369,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = True
     
     train_config = config["training"]
-    model_config = config["model"]["qae"]
+    model_config = config["model"]["vqvae"]
     batch_size = train_config["batch_size"]
     
     # Codebook size handling for different models

@@ -3,20 +3,24 @@
 name: T2M_Decouple
 
 data:
-    src: "text"
-    trg: "skels"
-    files: "files"
-    
+    src: "text"    # Source - Either Gloss->Pose or Text->Pose (gloss,text)
+    trg: "skels"    # Target - 3D body co-ordinates (skels)
+    files: "files"    # Filenames for each sequence
+
     train: "/home/user/Projects/Data/new_phoenix/train"
     dev: "/home/user/Projects/Data/new_phoenix/dev"
     test: "/home/user/Projects/Data/new_phoenix/test"
-    
-    # Motion codes directory (from get_motion_code.py)
-    code_dir: "Data/motion_codes_decouple"
-    
-    max_motion_length: 300
-    min_motion_length: 10
-    unit_length: 4
+    window_size: 64
+    min_motion_len: 20
+    max_motion_len: 300
+
+    max_sent_length: 300 # Max Sentence Length
+    skip_frames: 1   # Skip frames in the data, to reduce the data input size
+    src_vocab: "/home/user/Projects/research/HoT/dataset/text_src_vocab.txt"
+
+    min_motion_length: 40    # 최소 프레임 수 (이보다 짧으면 업샘플링)
+    max_motion_length: 300   # 최대 프레임 수 (이보다 길면 다운샘플링)
+    unit_length: 4           # 프레임 수는 이 값의 배수로 맞춤
     framerate: 25.0
 
 training:
