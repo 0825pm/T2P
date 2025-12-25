@@ -1,3 +1,19 @@
 checkpoint/
 demo/
 figure/
+experiments/
+
+# 모델 가중치 파일 무시
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# 데이터 폴더 무시
+checkpoints/
+results/
+
+# 파이썬 캐시 무시
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
