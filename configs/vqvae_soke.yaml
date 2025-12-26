@@ -1,0 +1,82 @@
+# SOKE Decouple VQ-VAE Config
+# For training with How2Sign, CSL-Daily, Phoenix-2014T
+
+name: vqvae_soke_decouple
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  # Data roots (modify these paths for your setup)
+  data_root: "../data/How2Sign"
+  csl_root: "../data/CSL-Daily"
+  phoenix_root: "../data/Phoenix_2014T"
+  
+  # Mean/Std paths (from SOKE preprocessing)
+  mean_path: "../data/CSL-Daily/mean.pt"
+  std_path: "../data/CSL-Daily/std.pt"
+  
+  # Which datasets to use (combine with underscore)
+  # Options: 'how2sign', 'csl', 'phoenix', 'how2sign_csl', 'how2sign_csl_phoenix'
+  dataset_name: "how2sign_csl_phoenix"
+  
+  # Motion length settings
+  min_motion_length: 40    # Minimum frames (shorter will be upsampled)
+  max_motion_length: 400   # Maximum frames (longer will be downsampled)
+  unit_length: 4           # Frame alignment (for VQ-VAE downsampling)
+  
+  # VAE training window (random crop for training)
+  win_size: 64
+
+# =============================================================================
+# Model Configuration (SOKE defaults)
+# =============================================================================
+model:
+  nfeats: 133              # SOKE uses 133 dims (filtered SMPL-X)
+  
+  # Codebook settings (SOKE defaults)
+  body_code_num: 96        # Body codebook size
+  hand_code_num: 192       # Hand codebook size (for both lhand, rhand)
+  code_dim: 512            # Codebook embedding dimension
+  
+  # Encoder/Decoder architecture
+  output_emb_width: 512
+  down_t: 2                # Temporal downsampling layers (4x total)
+  stride_t: 2              # Stride per layer
+  width: 512               # Hidden dimension
+  depth: 3                 # ResNet blocks per layer
+  dilation_growth_rate: 3  # Dilation growth
+  
+  # Normalization and activation
+  norm: null               # Options: null, 'batch', 'layer'
+  activation: "relu"       # Options: 'relu', 'gelu', 'silu'
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  epochs: 500
+  batch_size: 64
+  num_workers: 8
+  
+  # Optimizer
+  learning_rate: 0.0001
+  learning_rate_min: 0.000001
+  weight_decay: 0.01
+  
+  # Loss weights
+  commit_weight: 0.02      # Commitment loss weight
+  
+  # Checkpointing
+  model_dir: "checkpoints/vqvae_soke"
+  save_every: 10           # Save checkpoint every N epochs
+  
+  # Logging
+  log_every: 100           # Log every N batches
+
+# =============================================================================
+# Evaluation Configuration  
+# =============================================================================
+evaluation:
+  batch_size: 64
+  num_workers: 4
