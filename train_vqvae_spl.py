@@ -1,13 +1,13 @@
 """
-SOKE VQ-VAE Training Script (Decouple VQ-VAE)
-- Trains VQVAE model with separate codebooks for body/hands
+SPL-VQVAE Training Script
+- Trains SPL_VQVAE model for sign language motion reconstruction
 - Training data: SOKE format (133 dims, axis-angle rotations)
 - Metrics: computed on joint 3D coordinates (via SMPL-X forward pass)
 - Logs: recon_loss, commit_loss, velocity_loss, mpjpe, mpjve, dtw
 - Saves: best model (by MPJPE), periodic checkpoints, visualization videos
 
 Usage:
-    python train_vqvae_soke.py --config configs/vqvae_soke.yaml
+    python train_spl_vqvae.py --config configs/spl_vqvae.yaml
 """
 
 import os
@@ -53,66 +53,6 @@ except ImportError:
 # SOKE DataLoader
 from mGPT.data.humanml import H2SMotionDatasetVQ
 from mGPT.data.utils import humanml3d_collate
-
-
-# =============================================================================
-# VQ-VAE Loss Function
-# =============================================================================
-
-class VQVAELoss(nn.Module):
-    """Combined loss for VQ-VAE"""
-    def __init__(
-        self,
-        lambda_recon=1.0,
-        lambda_velocity=0.5,
-        lambda_commit=0.02,
-    ):
-        super().__init__()
-        self.lambda_recon = lambda_recon
-        self.lambda_velocity = lambda_velocity
-        self.lambda_commit = lambda_commit
-    
-    def forward(self, pred, target, commit_loss, mask=None):
-        """
-        Args:
-            pred: (B, T, D) - predicted poses (133 dims)
-            target: (B, T, D) - ground truth poses
-            commit_loss: scalar - commitment loss from quantizer
-            mask: (B, T) - optional mask for variable length
-        """
-        if mask is not None:
-            mask = mask.unsqueeze(-1)  # (B, T, 1)
-            pred = pred * mask
-            target = target * mask
-        
-        # Reconstruction loss (L1)
-        recon_loss = F.l1_loss(pred, target)
-        
-        # Velocity loss
-        if self.lambda_velocity > 0:
-            pred_vel = pred[:, 1:] - pred[:, :-1]
-            target_vel = target[:, 1:] - target[:, :-1]
-            if mask is not None:
-                vel_mask = mask[:, 1:] * mask[:, :-1]
-                pred_vel = pred_vel * vel_mask
-                target_vel = target_vel * vel_mask
-            velocity_loss = F.l1_loss(pred_vel, target_vel)
-        else:
-            velocity_loss = torch.tensor(0.0, device=pred.device)
-        
-        # Total loss
-        total_loss = (
-            self.lambda_recon * recon_loss +
-            self.lambda_velocity * velocity_loss +
-            self.lambda_commit * commit_loss
-        )
-        
-        return {
-            'total_loss': total_loss,
-            'recon_loss': recon_loss,
-            'velocity_loss': velocity_loss,
-            'commit_loss': commit_loss,
-        }
 
 
 # =============================================================================
@@ -241,34 +181,31 @@ class SMPLXConverter:
         # Parse parameters
         params = self._parse_soke_params(pose_133)
         
-        # Reshape to (B*T, ...) for batch processing
-        BT = B * T
-        global_orient = params['global_orient'].view(BT, 3)
-        body_pose = params['body_pose'].view(BT, -1)
-        left_hand_pose = params['left_hand_pose'].view(BT, -1)
-        right_hand_pose = params['right_hand_pose'].view(BT, -1)
-        jaw_pose = params['jaw_pose'].view(BT, 3)
-        expression = params['expression'].view(BT, -1)
-        betas = params['betas'].unsqueeze(1).expand(B, T, -1).reshape(BT, -1)
+        # Process frame by frame (SMPL-X expects batch, not sequence)
+        all_joints = []
+        all_vertices = [] if return_vertices else None
         
-        # Single SMPL-X forward pass for all frames
-        output = self.model(
-            global_orient=global_orient,
-            body_pose=body_pose,
-            left_hand_pose=left_hand_pose,
-            right_hand_pose=right_hand_pose,
-            jaw_pose=jaw_pose,
-            expression=expression,
-            betas=betas,
-            leye_pose=torch.zeros(BT, 3, device=device),
-            reye_pose=torch.zeros(BT, 3, device=device),
-        )
+        for t in range(T):
+            output = self.model(
+                global_orient=params['global_orient'][:, t],
+                body_pose=params['body_pose'][:, t],
+                left_hand_pose=params['left_hand_pose'][:, t],
+                right_hand_pose=params['right_hand_pose'][:, t],
+                jaw_pose=params['jaw_pose'][:, t],
+                expression=params['expression'][:, t],
+                betas=params['betas'],
+                leye_pose=torch.zeros(B, 3, device=device),
+                reye_pose=torch.zeros(B, 3, device=device),
+            )
+            
+            all_joints.append(output.joints)  # (B, J, 3)
+            if return_vertices:
+                all_vertices.append(output.vertices)  # (B, V, 3)
         
-        # Reshape back to (B, T, J, 3)
-        joints = output.joints.view(B, T, -1, 3)
+        joints = torch.stack(all_joints, dim=1)  # (B, T, J, 3)
         
         if return_vertices:
-            vertices = output.vertices.view(B, T, -1, 3)
+            vertices = torch.stack(all_vertices, dim=1)  # (B, T, V, 3)
             return joints, vertices
         
         return joints
@@ -1011,19 +948,18 @@ def save_comparison_video_with_frames(
         
         # Draw joints (smaller sizes)
         valid_body = [i for i in body_idx if i < len(joints)]
-        ax.scatter(x[valid_body], y[valid_body], c='blue', s=20, zorder=5)
+        ax.scatter(x[valid_body], y[valid_body], c='blue', s=30, zorder=5, edgecolors='white', linewidths=0.3)
         
         if show_hands:
             valid_lhand = [i for i in lhand_idx if i < len(joints)]
             valid_rhand = [i for i in rhand_idx if i < len(joints)]
             if valid_lhand:
-                ax.scatter(x[valid_lhand], y[valid_lhand], c='green', s=5, zorder=5)
+                ax.scatter(x[valid_lhand], y[valid_lhand], c='green', s=15, zorder=5, edgecolors='white', linewidths=0.3)
             if valid_rhand:
-                ax.scatter(x[valid_rhand], y[valid_rhand], c='red', s=5, zorder=5)
+                ax.scatter(x[valid_rhand], y[valid_rhand], c='red', s=15, zorder=5, edgecolors='white', linewidths=0.3)
         
         ax.set_xlim(x_min - margin, x_max + margin)
-        ax.set_ylim(y_min - margin, y_max + margin)
-        # ax.invert_yaxis()  # Flip so head is at top
+        ax.set_ylim(y_max + margin, y_min - margin)  # Inverted Y axis (head at top)
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
         ax.set_title(title_str, fontsize=14, fontweight='bold')
@@ -1152,7 +1088,7 @@ def compute_codebook_stats(all_codes, codebook_size):
     }
 
 
-def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, body_code_num=96, hand_code_num=192):
+def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, codebook_size=512):
     """Train for one epoch"""
     model.train()
     
@@ -1162,8 +1098,8 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, body_code_
     total_meter = AverageMeter()
     perplexity_meter = AverageMeter()
     
-    # Collect all codes for statistics (separate for each part)
-    all_codes = {'body': [], 'rhand': [], 'lhand': []}
+    # Collect all codes for statistics
+    all_codes = []
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch} [Train]')
     
@@ -1180,12 +1116,11 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, body_code_
         
         B = motion.shape[0]
         
-        # Forward (VQVAE doesn't use lengths)
-        output, commit_loss, perplexity_dict, indices_dict = model(motion)
+        # Forward
+        output, commit_loss, perplexity, codes = model(motion, lengths)
         
-        # Collect codes for each part
-        for part in ['body', 'rhand', 'lhand']:
-            all_codes[part].append(indices_dict[part].detach().cpu())
+        # Collect codes
+        all_codes.append(codes.detach().cpu())
         
         # Create mask
         max_len = motion.shape[1]
@@ -1200,15 +1135,12 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, body_code_
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
-        # Average perplexity across parts
-        avg_perplexity = (perplexity_dict['body'] + perplexity_dict['rhand'] + perplexity_dict['lhand']) / 3.0
-        
         # Update meters
         recon_meter.update(losses['recon_loss'].item(), B)
         commit_meter.update(losses['commit_loss'].item(), B)
         velocity_meter.update(losses['velocity_loss'].item(), B)
         total_meter.update(losses['total_loss'].item(), B)
-        perplexity_meter.update(avg_perplexity.item(), B)
+        perplexity_meter.update(perplexity.item(), B)
         
         pbar.set_postfix({
             'recon': f'{recon_meter.avg:.4f}',
@@ -1216,14 +1148,8 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, body_code_
             'ppl': f'{perplexity_meter.avg:.1f}',
         })
     
-    # Compute codebook statistics for each part
-    codebook_stats = {}
-    codebook_sizes = {'body': body_code_num, 'rhand': hand_code_num, 'lhand': hand_code_num}
-    for part, code_list in all_codes.items():
-        if code_list:
-            part_codes = [c.view(-1) for c in code_list]
-            part_stats = compute_codebook_stats(part_codes, codebook_sizes[part])
-            codebook_stats[part] = part_stats
+    # Compute codebook statistics
+    codebook_stats = compute_codebook_stats(all_codes, codebook_size)
     
     return {
         'recon_loss': recon_meter.avg,
@@ -1236,7 +1162,7 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, body_code_
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, loss_fn, device, epoch, mean=None, std=None, body_code_num=96, hand_code_num=192, smplx_converter=None):
+def evaluate(model, dataloader, loss_fn, device, epoch, mean=None, std=None, codebook_size=512, smplx_converter=None):
     """Evaluate model with SMPL-X forward pass for metrics"""
     model.eval()
     
@@ -1249,8 +1175,8 @@ def evaluate(model, dataloader, loss_fn, device, epoch, mean=None, std=None, bod
     dtw_meter = AverageMeter()
     perplexity_meter = AverageMeter()
     
-    # Collect all codes for statistics (separate for each part)
-    all_codes = {'body': [], 'rhand': [], 'lhand': []}
+    # Collect all codes for statistics
+    all_codes = []
     
     # Store samples for visualization
     vis_samples = []
@@ -1272,15 +1198,11 @@ def evaluate(model, dataloader, loss_fn, device, epoch, mean=None, std=None, bod
         
         B = motion.shape[0]
         
-        # Forward (VQVAE doesn't use lengths)
-        output, commit_loss, perplexity_dict, indices_dict = model(motion)
+        # Forward
+        output, commit_loss, perplexity, codes = model(motion, lengths)
         
-        # Collect codes for each part
-        for part in ['body', 'rhand', 'lhand']:
-            all_codes[part].append(indices_dict[part].detach().cpu())
-        
-        # Average perplexity across parts
-        avg_perplexity = (perplexity_dict['body'] + perplexity_dict['rhand'] + perplexity_dict['lhand']) / 3.0
+        # Collect codes
+        all_codes.append(codes.detach().cpu())
         
         # Create mask
         max_len = motion.shape[1]
@@ -1321,13 +1243,13 @@ def evaluate(model, dataloader, loss_fn, device, epoch, mean=None, std=None, bod
                 mpjpe_meter.update(mpjpe.item(), B)
                 mpjve_meter.update(mpjve.item(), B)
                 
-                # DTW (expensive, compute only for first sample)
-                if HAS_DTW and dtw_meter.count < 50:  # Limit total DTW computations
-                    L = int(lengths[0].item())
-                    pred_np = pred_joints[0, :L].cpu().numpy().reshape(L, -1)
-                    gt_np = gt_joints[0, :L].cpu().numpy().reshape(L, -1)
-                    dtw_dist = compute_dtw(pred_np, gt_np)
-                    if dtw_dist > 0:
+                # DTW (sample-wise, expensive)
+                if HAS_DTW and B <= 4:
+                    for i in range(B):
+                        L = int(lengths[i].item())
+                        pred_np = pred_joints[i, :L].cpu().numpy().reshape(L, -1)
+                        gt_np = gt_joints[i, :L].cpu().numpy().reshape(L, -1)
+                        dtw_dist = compute_dtw(pred_np, gt_np)
                         dtw_meter.update(dtw_dist, 1)
                 
                 # Store for visualization (with joint coordinates)
@@ -1349,12 +1271,9 @@ def evaluate(model, dataloader, loss_fn, device, epoch, mean=None, std=None, bod
                 if should_store:
                     L = int(lengths[0].item())
                     # Use full 127 joints for visualization (matching ipynb)
-                    pred_np = pred_joints[0, :L].cpu().numpy()
-                    gt_np = gt_joints[0, :L].cpu().numpy()
-                    
                     sample_data = {
-                        'pred': pred_np,
-                        'gt': gt_np,
+                        'pred': pred_joints[0, :L].cpu().numpy(),
+                        'gt': gt_joints[0, :L].cpu().numpy(),
                         'name': names[0] if names else '',
                         'src': current_src,
                     }
@@ -1416,7 +1335,7 @@ def evaluate(model, dataloader, loss_fn, device, epoch, mean=None, std=None, bod
         commit_meter.update(losses['commit_loss'].item(), B)
         velocity_meter.update(losses['velocity_loss'].item(), B)
         total_meter.update(losses['total_loss'].item(), B)
-        perplexity_meter.update(avg_perplexity.item(), B)
+        perplexity_meter.update(perplexity.item(), B)
         
         pbar.set_postfix({
             'mpjpe': f'{mpjpe_meter.avg:.2f}',
@@ -1424,14 +1343,8 @@ def evaluate(model, dataloader, loss_fn, device, epoch, mean=None, std=None, bod
             'ppl': f'{perplexity_meter.avg:.1f}',
         })
     
-    # Compute codebook statistics for each part
-    codebook_stats = {}
-    codebook_sizes = {'body': body_code_num, 'rhand': hand_code_num, 'lhand': hand_code_num}
-    for part, code_list in all_codes.items():
-        if code_list:
-            part_codes = [c.view(-1) for c in code_list]
-            part_stats = compute_codebook_stats(part_codes, codebook_sizes[part])
-            codebook_stats[part] = part_stats
+    # Compute codebook statistics
+    codebook_stats = compute_codebook_stats(all_codes, codebook_size)
     
     return {
         'recon_loss': recon_meter.avg,
@@ -1585,29 +1498,37 @@ def main(args):
     
     # Create model
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from model.vqvae_soke import VQVAE
+    from model.vqvae_spl import SPL_VQVAE, SPLVQVAELoss
     
-    model = VQVAE(
-        nfeats=model_config.get('nfeats', 133),
-        body_code_num=model_config.get('body_code_num', 96),
-        hand_code_num=model_config.get('hand_code_num', 192),
+    # Determine input format based on nfeats
+    nfeats = model_config.get('nfeats', 133)
+    input_format = 'soke' if nfeats == 133 else 'joint_coords'
+    
+    model = SPL_VQVAE(
+        embed_dim=model_config.get('embed_dim', 512),
+        depth=model_config.get('depth', 4),
+        num_heads=model_config.get('num_heads', 8),
+        mlp_dim=model_config.get('mlp_dim', 2048),
+        num_queries=model_config.get('num_queries', 32),
+        codebook_size=model_config.get('codebook_size', 512),
         code_dim=model_config.get('code_dim', 512),
-        output_emb_width=model_config.get('output_emb_width', 512),
         down_t=model_config.get('down_t', 2),
         stride_t=model_config.get('stride_t', 2),
-        width=model_config.get('width', 512),
-        depth=model_config.get('depth', 3),
-        dilation_growth_rate=model_config.get('dilation_growth_rate', 3),
-        activation=model_config.get('activation', 'relu'),
-        norm=model_config.get('norm', None),
+        max_len=data_config.get('max_motion_length', 300),
+        dropout=model_config.get('dropout', 0.1),
+        spl_hidden_layers=model_config.get('spl_hidden_layers', 3),
+        spl_hidden_units=model_config.get('spl_hidden_units', 512),
+        input_format=input_format,
+        nfeats=nfeats,
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"Body codebook: {model_config.get('body_code_num', 96)}")
-    print(f"Hand codebook: {model_config.get('hand_code_num', 192)}")
+    print(f"Input format: {input_format} ({nfeats} dims)")
+    print(f"Codebook size: {model_config.get('codebook_size', 512)}")
+    print(f"Q-Former queries: {model_config.get('num_queries', 32)}")
     
-    # Loss function (reuse the same loss class)
-    loss_fn = VQVAELoss(
+    # Loss function
+    loss_fn = SPLVQVAELoss(
         lambda_recon=train_config.get('lambda_recon', 1.0),
         lambda_velocity=train_config.get('lambda_velocity', 0.5),
         lambda_commit=train_config.get('lambda_commit', 0.02),
@@ -1647,9 +1568,8 @@ def main(args):
     log_path = os.path.join(output_dir, 'training_log.json')
     training_log = []
     
-    # Codebook sizes for stats
-    body_code_num = model_config.get('body_code_num', 96)
-    hand_code_num = model_config.get('hand_code_num', 192)
+    # Codebook size for stats
+    codebook_size = model_config.get('codebook_size', 512)
     
     # Initialize SMPL-X converter for metric computation
     smplx_config = config.get('smplx', {})
@@ -1680,13 +1600,13 @@ def main(args):
         # Train (on raw 133-dim axis-angle data)
         train_metrics = train_epoch(
             model, train_loader, optimizer, loss_fn, device, epoch,
-            body_code_num=body_code_num, hand_code_num=hand_code_num
+            codebook_size=codebook_size
         )
         
         # Evaluate (metrics on joint 3D coordinates via SMPL-X)
         val_metrics = evaluate(
             model, val_loader, loss_fn, device, epoch, mean, std,
-            body_code_num=body_code_num, hand_code_num=hand_code_num,
+            codebook_size=codebook_size,
             smplx_converter=smplx_converter
         )
         
@@ -1711,14 +1631,12 @@ def main(args):
         print(f"  Loss - Recon: {train_metrics['recon_loss']:.4f}, "
               f"Commit: {train_metrics['commit_loss']:.4f}, "
               f"Velocity: {train_metrics['velocity_loss']:.4f}")
-        print(f"  Perplexity: {train_metrics['perplexity']:.1f}")
-        # Print codebook stats per part
-        if train_metrics['codebook']:
-            for part, stats in train_metrics['codebook'].items():
-                if stats:
-                    print(f"  Codebook [{part}] - Used: {stats['used_codes']}/{stats['total_codes']} "
-                          f"({stats['usage_rate']:.1f}%), "
-                          f"Min: {stats['min_usage']:.0f}, Max: {stats['max_usage']:.0f}, Avg: {stats['avg_usage']:.1f}")
+        print(f"  Codebook - Used: {train_metrics['codebook']['used_codes']}/{train_metrics['codebook']['total_codes']} "
+              f"({train_metrics['codebook']['usage_rate']:.1f}%), "
+              f"Perplexity: {train_metrics['codebook']['perplexity']:.1f}")
+        print(f"  Code Usage - Min: {train_metrics['codebook']['min_usage']:.0f}, "
+              f"Max: {train_metrics['codebook']['max_usage']:.0f}, "
+              f"Avg: {train_metrics['codebook']['avg_usage']:.1f} ± {train_metrics['codebook']['std_usage']:.1f}")
         
         print(f"\n[Val]")
         print(f"  Loss - Recon: {val_metrics['recon_loss']:.4f}, "
@@ -1726,14 +1644,12 @@ def main(args):
         print(f"  Metrics - MPJPE: {val_metrics['mpjpe']:.2f}mm, "
               f"MPJVE: {val_metrics['mpjve']:.2f}mm, "
               f"DTW: {val_metrics['dtw']:.4f}")
-        print(f"  Perplexity: {val_metrics['perplexity']:.1f}")
-        # Print codebook stats per part
-        if val_metrics['codebook']:
-            for part, stats in val_metrics['codebook'].items():
-                if stats:
-                    print(f"  Codebook [{part}] - Used: {stats['used_codes']}/{stats['total_codes']} "
-                          f"({stats['usage_rate']:.1f}%), "
-                          f"Min: {stats['min_usage']:.0f}, Max: {stats['max_usage']:.0f}, Avg: {stats['avg_usage']:.1f}")
+        print(f"  Codebook - Used: {val_metrics['codebook']['used_codes']}/{val_metrics['codebook']['total_codes']} "
+              f"({val_metrics['codebook']['usage_rate']:.1f}%), "
+              f"Perplexity: {val_metrics['codebook']['perplexity']:.1f}")
+        print(f"  Code Usage - Min: {val_metrics['codebook']['min_usage']:.0f}, "
+              f"Max: {val_metrics['codebook']['max_usage']:.0f}, "
+              f"Avg: {val_metrics['codebook']['avg_usage']:.1f} ± {val_metrics['codebook']['std_usage']:.1f}")
         
         # Check if best
         is_best = val_metrics['mpjpe'] < best_mpjpe

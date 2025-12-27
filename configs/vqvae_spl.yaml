@@ -1,8 +1,8 @@
-# SOKE Decouple VQ-VAE Config
-# Separate codebooks for body/hands based VQ-VAE for Sign Language Motion
+# SPL-VQVAE Config
+# Structured Prediction Layer based VQ-VAE for Sign Language Motion
 # Compatible with How2Sign, CSL-Daily, Phoenix-2014T
 
-name: vqvae_soke
+name: spl_vqvae
 
 # =============================================================================
 # Data Configuration
@@ -31,37 +31,43 @@ data:
   
   # Window size for training (null = use full sequence with variable lengths)
   # Set to a number (e.g. 64) to use fixed-size random crops
-  win_size: 64
+  win_size: null
 
 # =============================================================================
-# Model Configuration (SOKE Decouple VQ-VAE)
+# Model Configuration (SPL-VQVAE)
 # =============================================================================
 model:
   # SOKE uses 133 dims (filtered SMPL-X axis-angle rotations)
-  # Split: body(24) + rhand(63) + lhand(46) = 133
+  # 133 = upper_body(30) + lhand(45) + rhand(45) + jaw(3) + expr(10)
   nfeats: 133
   
-  # Part dimensions (SOKE format)
-  body_nfeats: 24          # upper body
-  rhand_nfeats: 63         # right hand (21 joints * 3)
-  lhand_nfeats: 46         # left hand (15 joints * 3 + 1)
+  # Part dimensions for SPL (axis-angle)
+  body_dim: 33             # upper_body(30) + jaw(3)
+  lhand_dim: 45            # 15 joints * 3
+  rhand_dim: 45            # 15 joints * 3
+  expr_dim: 10             # expression coefficients
   
-  # Codebook settings (separate for each part)
-  body_code_num: 96        # Body codebook size
-  hand_code_num: 192       # Hand codebook size (for both lhand, rhand)
+  # Transformer settings
+  embed_dim: 64           # Hidden dimension
+  depth: 4                 # Number of transformer layers
+  num_heads: 8             # Number of attention heads
+  mlp_dim: 256            # FFN hidden dimension
+  dropout: 0.1             # Dropout rate
+  
+  # Q-Former settings
+  num_queries: 8          # Fixed number of output tokens
+  
+  # Codebook settings
+  codebook_size: 256       # VQ codebook size
   code_dim: 512            # Codebook embedding dimension
   
-  # Encoder/Decoder architecture
-  output_emb_width: 512    # Encoder output / Decoder input width
+  # Temporal compression (Conv1D based)
   down_t: 2                # Temporal downsampling layers (4x total)
   stride_t: 2              # Stride per layer
-  width: 512               # Hidden dimension
-  depth: 3                 # ResNet blocks per layer
-  dilation_growth_rate: 3  # Dilation growth
   
-  # Normalization and activation
-  norm: null               # Options: null, 'batch', 'layer'
-  activation: "relu"       # Options: 'relu', 'gelu', 'silu'
+  # SPL (Structured Prediction Layer) settings
+  spl_hidden_layers: 3     # MLP depth per joint
+  spl_hidden_units: 512    # MLP width per joint
 
 # =============================================================================
 # SMPL-X Configuration (for metric computation)
@@ -95,7 +101,7 @@ training:
   lambda_commit: 0.02      # Commitment loss weight
   
   # Checkpointing
-  model_dir: "checkpoints/vqvae_soke"
+  model_dir: "checkpoints/spl_vqvae"
   save_every: 10           # Save checkpoint every N epochs
   
   # Logging
