@@ -1,177 +1,83 @@
-# coding: utf-8
-"""
-SOKE Data Utils - Collate Functions
-https://github.com/2000ZRL/SOKE
-
-Batch collation for DataLoader
-"""
 import torch
+import rich
+import pickle
 import numpy as np
-from typing import List, Tuple, Dict, Any
 
 
-def humanml3d_collate(batch: List[Tuple]) -> Dict[str, Any]:
-    """
-    SOKE-style collate function for motion data.
-    
-    Input batch format (from dataset __getitem__):
-        (text, motion, length, name, _, _, _, all_captions, tasks, src)
-    
-    Output dict keys:
-        - text: List[str] - text annotations
-        - motion: (B, T_max, D) - padded motion sequences
-        - lengths: (B,) - original lengths
-        - name: List[str] - sample names
-        - all_captions: List[List[str]] - all captions
-        - tasks: List[dict] - task instructions
-        - src: List[str] - source datasets
-    """
-    # Filter out None items
-    batch = [b for b in batch if b is not None and b[1] is not None]
-    
-    if len(batch) == 0:
-        return None
-    
-    # Unpack
-    texts = [b[0] for b in batch]
-    motions = [b[1] for b in batch]
-    lengths = [b[2] for b in batch]
-    names = [b[3] for b in batch]
-    all_captions = [b[7] for b in batch]
-    tasks = [b[8] for b in batch]
-    srcs = [b[9] for b in batch]
-    
-    # Pad motions
+def lengths_to_mask(lengths):
     max_len = max(lengths)
-    
-    if isinstance(motions[0], torch.Tensor):
-        feat_dim = motions[0].shape[-1]
-        padded = torch.zeros(len(batch), max_len, feat_dim)
-        
-        for i, m in enumerate(motions):
-            padded[i, :lengths[i]] = m[:lengths[i]]
-    else:
-        # Handle numpy arrays
-        feat_dim = motions[0].shape[-1]
-        padded = np.zeros((len(batch), max_len, feat_dim))
-        
-        for i, m in enumerate(motions):
-            padded[i, :lengths[i]] = m[:lengths[i]]
-        padded = torch.from_numpy(padded).float()
-    
-    return {
-        'text': texts,
-        'motion': padded,
-        'lengths': torch.tensor(lengths),
-        'name': names,
-        'all_captions': all_captions,
-        'tasks': tasks,
-        'src': srcs,
+    mask = torch.arange(max_len, device=lengths.device).expand(
+        len(lengths), max_len) < lengths.unsqueeze(1)
+    return mask
+
+
+# padding to max length in one batch
+def collate_tensors(batch):
+    if isinstance(batch[0], np.ndarray):
+        batch = [torch.tensor(b).float() for b in batch]
+
+    dims = batch[0].dim()
+    max_size = [max([b.size(i) for b in batch]) for i in range(dims)]
+    size = (len(batch), ) + tuple(max_size)
+    canvas = batch[0].new_zeros(size=size)
+    for i, b in enumerate(batch):
+        sub_tensor = canvas[i]
+        for d in range(dims):
+            sub_tensor = sub_tensor.narrow(d, 0, b.size(d))
+        sub_tensor.add_(b)
+    return canvas
+
+def humanml3d_collate(batch):
+    notnone_batches = [b for b in batch if b is not None]
+    EvalFlag = False if notnone_batches[0][5] is None else True
+
+    # Sort by text length
+    if EvalFlag:
+        notnone_batches.sort(key=lambda x: x[5], reverse=True)
+
+    # Motion only
+    adapted_batch = {
+        "motion":
+        collate_tensors([b[1].float() for b in notnone_batches]),
+        "length": [b[2] for b in notnone_batches],
+        "src": [b[9] for b in notnone_batches],
+        "name": [b[3] for b in notnone_batches]
     }
 
+    # Text and motion
+    if notnone_batches[0][0] is not None:
+        adapted_batch.update({
+            "text": [b[0] for b in notnone_batches],
+            "all_captions": [b[7] for b in notnone_batches],
+        })
 
-def motion_token_collate(batch: List[Tuple]) -> Dict[str, Any]:
-    """
-    Collate function for motion token data (LM training).
-    
-    Input batch format:
-        (caption, m_tokens, length, name, _, _, _, all_captions, tasks, src)
-    
-    Output dict keys:
-        - text: List[str]
-        - motion_tokens: (B, T_max) - padded token sequences
-        - lengths: (B,)
-        - name: List[str]
-        - all_captions: List
-        - tasks: List
-        - src: List[str]
-    """
-    batch = [b for b in batch if b is not None and b[1] is not None]
-    
-    if len(batch) == 0:
-        return None
-    
-    texts = [b[0] for b in batch]
-    tokens = [b[1] for b in batch]
-    lengths = [b[2] for b in batch]
-    names = [b[3] for b in batch]
-    all_captions = [b[7] for b in batch]
-    tasks = [b[8] for b in batch]
-    srcs = [b[9] for b in batch]
-    
-    max_len = max(lengths)
-    
-    # Pad tokens (assuming pad_id = 0)
-    padded = torch.zeros(len(batch), max_len, dtype=torch.long)
-    
-    for i, t in enumerate(tokens):
-        if isinstance(t, torch.Tensor):
-            padded[i, :lengths[i]] = t[:lengths[i]]
-        else:
-            padded[i, :lengths[i]] = torch.from_numpy(t[:lengths[i]]).long()
-    
-    return {
-        'text': texts,
-        'motion_tokens': padded,
-        'lengths': torch.tensor(lengths),
-        'name': names,
-        'all_captions': all_captions,
-        'tasks': tasks,
-        'src': srcs,
-    }
+    # Evaluation related
+    if EvalFlag:
+        adapted_batch.update({
+            "text": [b[0] for b in notnone_batches],
+            "word_embs":
+            collate_tensors(
+                [torch.tensor(b[3]).float() for b in notnone_batches]),
+            "pos_ohot":
+            collate_tensors(
+                [torch.tensor(b[4]).float() for b in notnone_batches]),
+            "text_len":
+            collate_tensors([torch.tensor(b[5]) for b in notnone_batches]),
+            "tokens": [b[6] for b in notnone_batches],
+        })
+
+    # Tasks
+    if len(notnone_batches[0]) >= 9:
+        adapted_batch.update({"tasks": [b[8] for b in notnone_batches]})
+
+    return adapted_batch
 
 
-def decouple_token_collate(batch: List[Tuple]) -> Dict[str, Any]:
-    """
-    Collate function for decoupled motion tokens (body + lhand + rhand).
-    
-    Assumes motion_tokens has shape (T, 3) where:
-        - [:, 0] = body tokens
-        - [:, 1] = lhand tokens
-        - [:, 2] = rhand tokens
-    """
-    batch = [b for b in batch if b is not None and b[1] is not None]
-    
-    if len(batch) == 0:
-        return None
-    
-    texts = [b[0] for b in batch]
-    tokens = [b[1] for b in batch]
-    lengths = [b[2] for b in batch]
-    names = [b[3] for b in batch]
-    all_captions = [b[7] for b in batch]
-    tasks = [b[8] for b in batch]
-    srcs = [b[9] for b in batch]
-    
-    max_len = max(lengths)
-    
-    # Check if tokens are decoupled (T, 3) or single (T,)
-    if tokens[0].ndim == 2 and tokens[0].shape[1] == 3:
-        body_tokens = torch.zeros(len(batch), max_len, dtype=torch.long)
-        lhand_tokens = torch.zeros(len(batch), max_len, dtype=torch.long)
-        rhand_tokens = torch.zeros(len(batch), max_len, dtype=torch.long)
-        
-        for i, t in enumerate(tokens):
-            if isinstance(t, torch.Tensor):
-                body_tokens[i, :lengths[i]] = t[:lengths[i], 0]
-                lhand_tokens[i, :lengths[i]] = t[:lengths[i], 1]
-                rhand_tokens[i, :lengths[i]] = t[:lengths[i], 2]
-            else:
-                body_tokens[i, :lengths[i]] = torch.from_numpy(t[:lengths[i], 0]).long()
-                lhand_tokens[i, :lengths[i]] = torch.from_numpy(t[:lengths[i], 1]).long()
-                rhand_tokens[i, :lengths[i]] = torch.from_numpy(t[:lengths[i], 2]).long()
-        
-        return {
-            'text': texts,
-            'body_tokens': body_tokens,
-            'lhand_tokens': lhand_tokens,
-            'rhand_tokens': rhand_tokens,
-            'lengths': torch.tensor(lengths),
-            'name': names,
-            'all_captions': all_captions,
-            'tasks': tasks,
-            'src': srcs,
-        }
+def load_pkl(path, description=None, progressBar=False):
+    if progressBar:
+        with rich.progress.open(path, 'rb', description=description) as file:
+            data = pickle.load(file)
     else:
-        # Fallback to single token sequence
-        return motion_token_collate(batch)
+        with open(path, 'rb') as file:
+            data = pickle.load(file)
+    return data

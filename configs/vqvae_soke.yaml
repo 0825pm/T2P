@@ -22,7 +22,8 @@ data:
   
   # Which datasets to use (combine with underscore)
   # Options: 'how2sign', 'csl', 'phoenix', 'how2sign_csl', 'how2sign_csl_phoenix'
-  dataset_name: "how2sign_csl_phoenix"
+  # dataset_name: "how2sign_csl_phoenix"
+  dataset_name: "csl"
   
   # Motion length settings
   min_motion_length: 40    # Minimum frames (shorter will be padded)

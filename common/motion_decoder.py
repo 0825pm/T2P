@@ -1,169 +1,221 @@
+# coding: utf-8
 """
-Motion Decoder: Convert predicted codes to poses using VQ-VAE decoder.
+Motion Decoder - VQ-VAE Decoder for Motion Code to Pose Conversion
+
+Loads trained VQ-VAE decoder and converts motion codes to pose sequences.
 """
+
 import torch
+import torch.nn as nn
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import Dict, Tuple, Optional, Union
 
 
 class MotionDecoder:
     """
-    Decode motion codes to poses using trained VQ-VAE.
+    Motion Decoder wrapper for VQ-VAE.
+    
+    Loads trained VQ-VAE and provides methods to decode motion codes to poses.
     """
     
     def __init__(
         self,
-        vqvae_model,
+        vqvae_path: str,
+        model_config: dict,
         device: str = 'cuda',
-        down_t: int = 2,
     ):
         """
         Args:
-            vqvae_model: Trained DecoupleVQVae model
-            device: Device to run on
-            down_t: Temporal downsampling factor
+            vqvae_path: Path to trained VQ-VAE checkpoint
+            model_config: Model configuration dict
+            device: Target device
         """
-        self.vqvae = vqvae_model
-        self.vqvae.eval()
         self.device = device
-        self.down_t = down_t
-        self.upsample_factor = 2 ** down_t  # 4 for down_t=2
+        self.model_config = model_config
+        
+        # Load VQ-VAE model - use vqvae_soke which matches checkpoint
+        try:
+            from model.vqvae_soke import VQVAE
+        except ImportError:
+            from model.vqvae_decouple import VQVAE
+        
+        vqvae_config = {
+            'nfeats': model_config.get('nfeats', 133),
+            'body_code_num': model_config.get('body_code_num', 96),
+            'hand_code_num': model_config.get('hand_code_num', 192),
+            'code_dim': model_config.get('code_dim', 512),
+            'output_emb_width': model_config.get('output_emb_width', 512),
+            'down_t': model_config.get('down_t', 2),
+            'stride_t': model_config.get('stride_t', 2),
+            'width': model_config.get('width', 512),
+            'depth': model_config.get('depth', 3),
+            'dilation_growth_rate': model_config.get('dilation_growth_rate', 3),
+            'activation': model_config.get('activation', 'relu'),
+            'norm': model_config.get('norm', None),
+        }
+        
+        self.vqvae = VQVAE(**vqvae_config)
+        
+        # Load checkpoint
+        ckpt = torch.load(vqvae_path, map_location='cpu', weights_only=False)
+        
+        # Handle different checkpoint formats
+        if 'model_state_dict' in ckpt:
+            state_dict = ckpt['model_state_dict']
+        elif 'state_dict' in ckpt:
+            state_dict = ckpt['state_dict']
+        else:
+            state_dict = ckpt
+        
+        self.vqvae.load_state_dict(state_dict, strict=True)
+        self.vqvae = self.vqvae.to(device)
+        self.vqvae.eval()
+        
+        print(f"Loaded VQ-VAE from {vqvae_path}")
     
     @torch.no_grad()
     def decode(
         self,
-        body_codes: torch.Tensor,
-        lhand_codes: torch.Tensor,
-        rhand_codes: torch.Tensor,
-    ) -> np.ndarray:
+        body_codes: Union[np.ndarray, torch.Tensor],
+        lhand_codes: Union[np.ndarray, torch.Tensor],
+        rhand_codes: Union[np.ndarray, torch.Tensor],
+    ) -> torch.Tensor:
         """
-        Decode codes to poses.
+        Decode motion codes to pose sequence.
         
         Args:
-            body_codes: (T,) tensor of body codes
-            lhand_codes: (T,) tensor of left hand codes
-            rhand_codes: (T,) tensor of right hand codes
-        
+            body_codes: Body code indices (T,) or (B, T)
+            lhand_codes: Left hand code indices (T,) or (B, T)
+            rhand_codes: Right hand code indices (T,) or (B, T)
+            
         Returns:
-            poses: (T*upsample_factor, 150) numpy array
+            Pose sequence (B, T*4, 133) - upsampled by factor of 4
         """
-        # Ensure same length
-        min_len = min(len(body_codes), len(lhand_codes), len(rhand_codes))
-        body_codes = body_codes[:min_len]
-        lhand_codes = lhand_codes[:min_len]
-        rhand_codes = rhand_codes[:min_len]
+        # Convert to tensor if needed
+        if isinstance(body_codes, np.ndarray):
+            body_codes = torch.from_numpy(body_codes).long()
+        if isinstance(lhand_codes, np.ndarray):
+            lhand_codes = torch.from_numpy(lhand_codes).long()
+        if isinstance(rhand_codes, np.ndarray):
+            rhand_codes = torch.from_numpy(rhand_codes).long()
         
-        # To device
-        body_codes = body_codes.long().to(self.device)
-        lhand_codes = lhand_codes.long().to(self.device)
-        rhand_codes = rhand_codes.long().to(self.device)
+        # Add batch dimension if needed
+        if body_codes.dim() == 1:
+            body_codes = body_codes.unsqueeze(0)
+            lhand_codes = lhand_codes.unsqueeze(0)
+            rhand_codes = rhand_codes.unsqueeze(0)
         
-        # Add batch dimension: (T,) -> (1, T)
-        body_codes = body_codes.unsqueeze(0)
-        lhand_codes = lhand_codes.unsqueeze(0)
-        rhand_codes = rhand_codes.unsqueeze(0)
+        # Move to device
+        body_codes = body_codes.to(self.device)
+        lhand_codes = lhand_codes.to(self.device)
+        rhand_codes = rhand_codes.to(self.device)
         
-        # Decode using VQ-VAE
-        # codes_dict format: {'body': (1, T), 'lhand': (1, T), 'rhand': (1, T)}
-        codes_dict = {
-            'body': body_codes,
-            'lhand': lhand_codes,
-            'rhand': rhand_codes,
-        }
+        # Align sequence lengths (use minimum)
+        min_len = min(body_codes.shape[1], lhand_codes.shape[1], rhand_codes.shape[1])
+        body_codes = body_codes[:, :min_len]
+        lhand_codes = lhand_codes[:, :min_len]
+        rhand_codes = rhand_codes[:, :min_len]
         
-        # Get quantized embeddings from codebook
-        # Body
-        body_emb = self.vqvae.body_vae.quantizer.dequantize(body_codes)  # (1, T, C)
-        body_emb = body_emb.permute(0, 2, 1)  # (1, C, T)
-        body_pose = self.vqvae.body_vae.decoder(body_emb)  # (1, 24, T')
-        body_pose = body_pose.permute(0, 2, 1)  # (1, T', 24)
+        # Decode
+        poses = self.vqvae.decode_from_codes(body_codes, lhand_codes, rhand_codes)
         
-        # LHand
-        lhand_emb = self.vqvae.lhand_vae.quantizer.dequantize(lhand_codes)
-        lhand_emb = lhand_emb.permute(0, 2, 1)
-        lhand_pose = self.vqvae.lhand_vae.decoder(lhand_emb)
-        lhand_pose = lhand_pose.permute(0, 2, 1)  # (1, T', 63)
-        
-        # RHand
-        rhand_emb = self.vqvae.rhand_vae.quantizer.dequantize(rhand_codes)
-        rhand_emb = rhand_emb.permute(0, 2, 1)
-        rhand_pose = self.vqvae.rhand_vae.decoder(rhand_emb)
-        rhand_pose = rhand_pose.permute(0, 2, 1)  # (1, T', 63)
-        
-        # Concatenate: body (24) + rhand (63) + lhand (63) = 150
-        full_pose = torch.cat([body_pose, rhand_pose, lhand_pose], dim=-1)  # (1, T', 150)
-        
-        return full_pose[0].cpu().numpy()  # (T', 150)
+        return poses
     
     @torch.no_grad()
-    def decode_batch(
+    def decode_combined(
         self,
-        body_codes_list: List[torch.Tensor],
-        lhand_codes_list: List[torch.Tensor],
-        rhand_codes_list: List[torch.Tensor],
-    ) -> List[np.ndarray]:
+        codes: Union[np.ndarray, torch.Tensor],
+    ) -> torch.Tensor:
         """
-        Decode a batch of codes to poses.
+        Decode combined motion codes.
         
+        Args:
+            codes: Combined codes (T, 3) or (B, T, 3) where [:, :, 0]=body, [:, :, 1]=lhand, [:, :, 2]=rhand
+            
         Returns:
-            List of pose arrays
+            Pose sequence (B, T*4, 133)
         """
-        poses = []
-        for body, lhand, rhand in zip(body_codes_list, lhand_codes_list, rhand_codes_list):
-            pose = self.decode(body, lhand, rhand)
-            poses.append(pose)
-        return poses
+        if isinstance(codes, np.ndarray):
+            codes = torch.from_numpy(codes).long()
+        
+        if codes.dim() == 2:
+            codes = codes.unsqueeze(0)  # Add batch dim
+        
+        body_codes = codes[:, :, 0]
+        lhand_codes = codes[:, :, 1]
+        rhand_codes = codes[:, :, 2]
+        
+        return self.decode(body_codes, lhand_codes, rhand_codes)
 
 
-def load_vqvae_decoder(checkpoint_path: str, config: dict, device: str = 'cuda'):
+def load_vqvae_decoder(
+    vqvae_path: str,
+    model_config: dict,
+    device: str = 'cuda',
+) -> MotionDecoder:
     """
-    Load trained VQ-VAE model for decoding.
+    Load VQ-VAE decoder.
     
     Args:
-        checkpoint_path: Path to VQ-VAE checkpoint
-        config: Model config dict
-        device: Device
-    
+        vqvae_path: Path to trained VQ-VAE checkpoint
+        model_config: Model configuration dict
+        device: Target device
+        
     Returns:
         MotionDecoder instance
     """
-    from model.vqvae_decouple import VQVAE
+    return MotionDecoder(vqvae_path, model_config, device)
+
+
+# Alternative simpler decoder for when we don't need the full VQVAE
+class SimpleMotionDecoder:
+    """
+    Simple motion decoder that only loads codebook embeddings.
+    """
     
-    # Create model
-    vqvae = VQVAE(
-        nfeats=150,
-        body_code_num=config.get('body_code_num', 96),
-        hand_code_num=config.get('hand_code_num', 192),
-        code_dim=config.get('code_dim', 512),
-        output_emb_width=config.get('output_emb_width', 512),
-        down_t=config.get('down_t', 2),
-        stride_t=config.get('stride_t', 2),
-        width=config.get('width', 512),
-        depth=config.get('depth', 3),
-        dilation_growth_rate=config.get('dilation_growth_rate', 3),
-        activation=config.get('activation', 'relu'),
-        norm=config.get('norm', None),
-    )
+    def __init__(
+        self,
+        vqvae_path: str,
+        model_config: dict,
+        device: str = 'cuda',
+    ):
+        self.device = device
+        
+        # Load checkpoint
+        state_dict = torch.load(vqvae_path, map_location='cpu', weights_only=False)
+        
+        # Extract codebook embeddings
+        self.body_codebook = state_dict.get('body_quantizer.codebook.weight', 
+                                            state_dict.get('quantizer_body.codebook.weight'))
+        self.lhand_codebook = state_dict.get('lhand_quantizer.codebook.weight',
+                                             state_dict.get('quantizer_lhand.codebook.weight'))
+        self.rhand_codebook = state_dict.get('rhand_quantizer.codebook.weight',
+                                             state_dict.get('quantizer_rhand.codebook.weight'))
+        
+        if self.body_codebook is not None:
+            self.body_codebook = self.body_codebook.to(device)
+        if self.lhand_codebook is not None:
+            self.lhand_codebook = self.lhand_codebook.to(device)
+        if self.rhand_codebook is not None:
+            self.rhand_codebook = self.rhand_codebook.to(device)
+        
+        print(f"Loaded codebooks from {vqvae_path}")
     
-    # Load checkpoint
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    if 'model_state_dict' in state_dict:
-        state_dict = state_dict['model_state_dict']
-    elif 'state_dict' in state_dict:
-        state_dict = state_dict['state_dict']
-    
-    # Remove 'module.' prefix if present
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith('module.'):
-            new_state_dict[k[7:]] = v
-        else:
-            new_state_dict[k] = v
-    
-    vqvae.load_state_dict(new_state_dict, strict=False)
-    vqvae = vqvae.to(device)
-    vqvae.eval()
-    
-    print(f"Loaded VQ-VAE from {checkpoint_path}")
-    
-    return MotionDecoder(vqvae, device=device, down_t=config.get('down_t', 2))
+    @torch.no_grad()
+    def get_embeddings(
+        self,
+        body_codes: torch.Tensor,
+        lhand_codes: torch.Tensor,
+        rhand_codes: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get codebook embeddings for given codes.
+        
+        Returns:
+            Tuple of (body_emb, lhand_emb, rhand_emb)
+        """
+        body_emb = self.body_codebook[body_codes] if self.body_codebook is not None else None
+        lhand_emb = self.lhand_codebook[lhand_codes] if self.lhand_codebook is not None else None
+        rhand_emb = self.rhand_codebook[rhand_codes] if self.rhand_codebook is not None else None
+        
+        return body_emb, lhand_emb, rhand_emb

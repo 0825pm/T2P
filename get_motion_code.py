@@ -2,10 +2,10 @@
 Extract Motion Codes from trained VQ-VAE
 Uses same data loading as train_vqvae_soke.py
 
-Output: data/motion_codes/{src}/{split}/{name}.npy
+Output: data/motion_codes/{src}/{split}/{original_name}.npy
 
 Usage:
-    python extract_motion_codes.py \
+    python get_motion_code.py \
         --config configs/vqvae_soke.yaml \
         --checkpoint checkpoints/vqvae_soke/best.pth \
         --output_dir data/motion_codes
@@ -111,6 +111,9 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     total_all = 0
     
+    # Track indices per folder for building index.json
+    folder_indices = {}
+    
     # =========================================================================
     # Process each split (same as train_vqvae_soke.py)
     # =========================================================================
@@ -146,8 +149,23 @@ def main():
                 continue
             
             motion = batch['motion'].to(device)  # (1, T, 133)
-            name = batch['names'][0] if 'names' in batch else f'sample_{split_total}'
-            src = batch['src'][0] if 'src' in batch and batch['src'][0] else 'unknown'
+            
+            # Get original name from batch - try multiple keys
+            original_name = None
+            for key in ['name', 'names']:
+                if key in batch and batch[key]:
+                    val = batch[key]
+                    if isinstance(val, list) and len(val) > 0:
+                        original_name = val[0]
+                    elif isinstance(val, str):
+                        original_name = val
+                    break
+            
+            # Fallback to sample index
+            if original_name is None:
+                original_name = f'sample_{total_all + split_total}'
+            
+            src = batch['src'][0] if 'src' in batch and batch['src'] else 'unknown'
             
             # Encode
             with torch.no_grad():
@@ -171,46 +189,62 @@ def main():
             # Determine output directory based on dataset structure
             if src == 'csl':
                 # CSL-Daily: all data in poses/ folder (no split subdirs)
-                out_dir = os.path.join(args.output_dir, folder_name, 'poses')
+                # split_name = split
+                # out_dir = os.path.join(args.output_dir, folder_name, split_name)
+                out_dir = os.path.join(args.output_dir, folder_name, 'codes')
+                split_name = 'codes'
             elif src == 'phoenix':
                 # Phoenix: uses 'dev' instead of 'val'
                 split_name = 'dev' if split == 'val' else split
                 out_dir = os.path.join(args.output_dir, folder_name, split_name)
             else:
                 # How2Sign: train/val/test subdirs
-                out_dir = os.path.join(args.output_dir, folder_name, split)
+                split_name = split
+                out_dir = os.path.join(args.output_dir, folder_name, split_name)
             
             os.makedirs(out_dir, exist_ok=True)
-            np.save(os.path.join(out_dir, f'{name}.npy'), codes)
+            
+            # Save with original name (sanitize for filesystem)
+            safe_name = original_name.replace('/', '_').replace('\\', '_')
+            np.save(os.path.join(out_dir, f'{safe_name}.npy'), codes)
+            
+            # Track for index.json
+            folder_key = f"{folder_name}/{split_name}"
+            if folder_key not in folder_indices:
+                folder_indices[folder_key] = []
+            folder_indices[folder_key].append({
+                'name': safe_name,
+                'path': f'{safe_name}.npy',
+                'original_name': original_name,
+                'src': src,
+                'split': split,
+            })
             
             split_total += 1
             src_counts[src] = src_counts.get(src, 0) + 1
             
             if split_total <= 3:
                 rel_path = os.path.relpath(out_dir, args.output_dir)
-                print(f"  Example: {rel_path}/{name}.npy | shape={codes.shape}")
+                print(f"  Example: {rel_path}/{safe_name}.npy | shape={codes.shape} | orig={original_name}")
         
         print(f"Saved {split_total} samples")
         for src, cnt in src_counts.items():
             print(f"  {src}: {cnt}")
         total_all += split_total
-        
-        # Create index.json per folder/split
-        src_to_folder = {
-            'how2sign': 'How2Sign',
-            'csl': 'CSL-Daily',
-            'phoenix': 'Phoenix_2014T',
-        }
-        for src in src_counts.keys():
-            folder_name = src_to_folder.get(src, src)
-            if src == 'csl':
-                # CSL: all in poses/ folder
-                create_index(os.path.join(args.output_dir, folder_name, 'poses'))
-            elif src == 'phoenix':
-                split_name = 'dev' if split == 'val' else split
-                create_index(os.path.join(args.output_dir, folder_name, split_name))
-            else:
-                create_index(os.path.join(args.output_dir, folder_name, split))
+    
+    # =========================================================================
+    # Create index.json for each folder
+    # =========================================================================
+    print(f"\n{'='*60}")
+    print("Creating index files...")
+    print(f"{'='*60}")
+    
+    for folder_key, indices in folder_indices.items():
+        out_dir = os.path.join(args.output_dir, folder_key)
+        index_path = os.path.join(out_dir, 'index.json')
+        with open(index_path, 'w') as f:
+            json.dump(indices, f, indent=2)
+        print(f"  {folder_key}/index.json: {len(indices)} entries")
     
     # Save metadata
     metadata = {
@@ -228,21 +262,6 @@ def main():
     print(f"Done! Total: {total_all}")
     print(f"Output: {args.output_dir}")
     print(f"{'='*60}")
-
-
-def create_index(out_dir):
-    """Create index.json"""
-    if not os.path.exists(out_dir):
-        return
-    
-    index = []
-    for f in os.listdir(out_dir):
-        if f.endswith('.npy'):
-            index.append({'name': f[:-4], 'path': f})
-    
-    with open(os.path.join(out_dir, 'index.json'), 'w') as f:
-        json.dump(index, f)
-    print(f"  Index: {out_dir}/index.json ({len(index)} entries)")
 
 
 if __name__ == "__main__":

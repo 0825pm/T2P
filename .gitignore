@@ -3,6 +3,7 @@ demo/
 figure/
 experiments/
 data/
+deps/
 
 # 모델 가중치 파일 무시
 *.pt

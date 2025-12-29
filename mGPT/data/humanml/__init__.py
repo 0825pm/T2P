@@ -1,28 +1,8 @@
-# coding: utf-8
-"""
-SOKE HumanML Datasets
-"""
-from .dataset_t2m import Text2MotionDataset, Text2MotionDatasetEval
+from .dataset_t2m import Text2MotionDataset
+from .dataset_t2m_eval import Text2MotionDatasetEval
 from .dataset_t2m_cb import Text2MotionDatasetCB
+from .dataset_t2m_token import Text2MotionDatasetToken
+from .dataset_t2m_m2t import Text2MotionDatasetM2T
+from .dataset_m import MotionDataset
+from .dataset_m_vq import MotionDatasetVQ
 from .dataset_m_vq_sign import H2SMotionDatasetVQ
-from .load_data import (
-    load_h2s_sample,
-    load_csl_sample,
-    load_phoenix_sample,
-    load_iso_sample,
-    sample,
-    keys
-)
-
-__all__ = [
-    'Text2MotionDataset',
-    'Text2MotionDatasetEval',
-    'Text2MotionDatasetCB',
-    'H2SMotionDatasetVQ',
-    'load_h2s_sample',
-    'load_csl_sample',
-    'load_phoenix_sample',
-    'load_iso_sample',
-    'sample',
-    'keys',
-]

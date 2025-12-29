@@ -1,0 +1,156 @@
+# =============================================================================
+# T2M mBART Configuration
+# Text-to-Motion Generation using mBART (SOKE style)
+# =============================================================================
+
+name: t2m_mbart
+
+# =============================================================================
+# Data Configuration (Multi-dataset: How2Sign + CSL + Phoenix)
+# =============================================================================
+data:
+  # Dataset selection: 'how2sign', 'csl', 'phoenix', or combined like 'how2sign_csl_phoenix'
+  dataset_name: "how2sign_csl_phoenix"
+  
+  # How2Sign paths
+  how2sign:
+    root: "/home/user/Projects/research/SOKE/data/How2Sign"
+    # CSVs are in {root}/{split}/re_aligned/how2sign_realigned_{split}_preprocessed_fps.csv
+  
+  # CSL-Daily paths
+  csl:
+    root: "/home/user/Projects/research/SOKE/data/CSL-Daily"
+    # Annotations: csl_clean.train, csl_clean.dev, csl_clean.test
+  
+  # Phoenix-2014T paths
+  phoenix:
+    root: "/home/user/Projects/research/SOKE/data/Phoenix_2014T"
+    # Annotations: phoenix14t.train, phoenix14t.dev, phoenix14t.test
+  
+  # Pre-extracted motion codes path
+  motion_code_path: "/home/user/Projects/research/T2P/data/motion_codes"
+  
+  # Mean/Std for denormalization
+  mean_path: "/home/user/Projects/research/SOKE/data/CSL-Daily/mean.pt"
+  std_path: "/home/user/Projects/research/SOKE/data/CSL-Daily/std.pt"
+  
+  # Sequence length settings
+  max_motion_length: 400
+  min_motion_length: 40
+  unit_length: 4
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  # mBART model path (SOKE fine-tuned version)
+  lm_model_path: "/home/user/Projects/research/SOKE/deps/mbart-h2s-csl-phoenix"
+  lm_model_type: "mbart_multi"
+  
+  # Codebook sizes (must match VQ-VAE)
+  body_code_num: 96
+  hand_code_num: 192
+  rhand_code_num: 192
+  
+  # Multi-head settings
+  num_heads: 3  # body, lhand, rhand
+  
+  # Sequence lengths
+  max_length: 256        # Maximum motion token length
+  max_text_length: 128   # Maximum text token length
+  
+  # Temporal settings
+  down_t: 2              # VQ-VAE temporal downsampling (4x)
+  
+  # Regularization
+  label_smoothing: 0.1
+  dropout: 0.1
+  freeze_encoder: true   # Freeze mBART encoder
+  
+  # =========================================================================
+  # LoRA Configuration (for faster training)
+  # =========================================================================
+  lora:
+    enabled: false         # Disable LoRA for faster training
+    rank: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - v_proj
+      - k_proj
+      - out_proj
+  
+  # VQ-VAE model config (for decoder)
+  nfeats: 133
+  code_dim: 512
+  output_emb_width: 512
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  activation: "relu"
+  norm: null
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  # Basic
+  epochs: 150
+  batch_size: 64
+  num_workers: 4
+  
+  # Optimizer
+  learning_rate: 2e-4
+  learning_rate_min: 1e-6
+  weight_decay: 0.01
+  
+  # Scheduler
+  sched: "cosine"
+  warmup_epochs: 10
+  min_lr: 1e-6
+  
+  # Gradient
+  clip_grad_norm: 1.0
+  
+  # Checkpointing
+  model_dir: "checkpoints/t2m_mbart"
+  save_every: 10
+  
+  # Evaluation
+  eval_every: 10  # Generation evaluation every N epochs
+  
+  # VQ-VAE checkpoint (for decoding during evaluation)
+  vqvae_path: "/home/user/Projects/research/T2P/checkpoints/vqvae_soke/20251227_001744/checkpoints/epoch_0082_best.pth"
+  
+  # Logging
+  log_every: 50
+
+# =============================================================================
+# Loss Configuration
+# =============================================================================
+loss:
+  # Head weights
+  lambda_body: 1.0
+  lambda_lhand: 0.4
+  lambda_rhand: 0.4
+  
+  # Label smoothing
+  label_smoothing: 0.1
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+evaluation:
+  batch_size: 16
+  num_workers: 4
+  
+  # Generation settings
+  max_gen_length: 200
+  num_beams: 1
+  do_sample: false
+  
+  # Metrics
+  compute_mpjpe: true
+  compute_dtw: true
