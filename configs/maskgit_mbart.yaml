@@ -1,0 +1,125 @@
+# =============================================================================
+# MaskGIT mBART Configuration
+# Location: /home/user/Projects/research/T2P/configs/maskgit_mbart.yaml
+# =============================================================================
+
+name: maskgit_mbart
+
+# =============================================================================
+# Data Configuration (Multi-dataset: How2Sign + CSL + Phoenix)
+# =============================================================================
+data:
+  # Dataset selection
+  dataset_name: "how2sign_csl_phoenix"
+  
+  # =========================================================================
+  # All data in T2P/data/
+  # =========================================================================
+  
+  # How2Sign
+  # - Codes: data/How2Sign/codes/{train,val,test}/{name}.npy
+  # - CSV:   data/How2Sign/poses/{split}/re_aligned/how2sign_realigned_{split}_preprocessed_fps.csv
+  how2sign:
+    root: "/home/user/Projects/research/T2P/data/How2Sign"
+  
+  # CSL-Daily  
+  # - Codes: data/CSL-Daily/codes/{name}.npy (no split subdirs)
+  # - Annotations: data/CSL-Daily/csl_clean.{train,val,test}
+  csl:
+    root: "/home/user/Projects/research/T2P/data/CSL-Daily"
+  
+  # Phoenix-2014T
+  # - Codes: data/Phoenix_2014T/codes/{train,dev,test}/{name}.npy
+  # - Annotations: data/Phoenix_2014T/phoenix14t.{train,dev,test}
+  phoenix:
+    root: "/home/user/Projects/research/T2P/data/Phoenix_2014T"
+  
+  # Motion codes root (same structure as above)
+  motion_code_path: "/home/user/Projects/research/T2P/data"
+  
+  # Mean/Std for normalization
+  mean_path: "/home/user/Projects/research/T2P/data/CSL-Daily/mean.pt"
+  std_path: "/home/user/Projects/research/T2P/data/CSL-Daily/std.pt"
+  
+  # Sequence length settings
+  max_motion_length: 400
+  min_motion_length: 40
+  unit_length: 4  # VQ-VAE temporal downsampling factor (4x)
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  # mBART pretrained path (in T2P/deps)
+  mbart_path: "/home/user/Projects/research/T2P/deps/mbart-h2s-csl-phoenix"
+  
+  # Encoder settings
+  freeze_encoder: true              # Freeze mBART encoder initially
+  
+  # Codebook sizes (must match VQ-VAE)
+  body_vocab_size: 96
+  hand_vocab_size: 192
+  
+  # Body Transformer
+  body_d_model: 512
+  body_n_heads: 8
+  body_n_layers: 12
+  body_d_ff: 2048
+  
+  # Hand Transformer (smaller, body-conditioned)
+  hand_d_model: 384
+  hand_n_heads: 6
+  hand_n_layers: 8
+  hand_d_ff: 1536
+  
+  # Common settings
+  max_seq_len: 256               # Max chunk length
+  max_chunks: 128                # Max chunks for length predictor
+  max_text_length: 128           # Max text token length
+  dropout: 0.1
+  label_smoothing: 0.1
+  
+  # Generation settings
+  num_iterations: 10             # MaskGIT decoding iterations
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  # Basic settings
+  epochs: 100
+  batch_size: 32
+  num_workers: 8
+  
+  # Optimizer
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+  
+  # Scheduler
+  warmup_steps: 4000
+  
+  # Mixed precision
+  use_amp: true
+  
+  # Encoder unfreezing schedule
+  # -1: never unfreeze, N: unfreeze at epoch N
+  unfreeze_encoder_epoch: -1
+  unfreeze_layers: -1              # -1: all layers, N: last N layers
+  
+  # Checkpointing
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  save_every: 5                   # Save every N epochs
+  
+  # Seed
+  seed: 42
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+evaluation:
+  batch_size: 64
+  num_iterations: 10              # MaskGIT iterations for generation
+  temperature: 1.0
+  top_k: null                     # null = no top-k sampling
