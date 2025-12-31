@@ -1,0 +1,102 @@
+# =============================================================================
+# SPL-VQVAE v2 Configuration (SOKE 133 dims format)
+# =============================================================================
+
+name: spl_vqvae_v2
+
+# =============================================================================
+# Data Configuration (Uses H2SMotionDatasetVQ)
+# =============================================================================
+data:
+  # How2Sign: CSV가 poses 안에 있음
+  data_root: "/home/user/Projects/research/T2P/data/How2Sign/poses"
+  
+  # CSL: annotation이 상위 폴더
+  csl_root: "/home/user/Projects/research/T2P/data/CSL-Daily"
+  
+  # Phoenix: annotation이 상위 폴더 (둘 다 같은 경로!)
+  phoenix_root: "/home/user/Projects/research/T2P/data/Phoenix_2014T/poses"
+  phoenix_poses_root: "/home/user/Projects/research/T2P/data/Phoenix_2014T/poses"
+  
+  # Dataset selection
+  dataset_name: "how2sign_csl_phoenix"
+  
+  # Mean/Std for normalization (179 dims, will be filtered to 133)
+  mean_path: "/home/user/Projects/research/T2P/data/CSL-Daily/mean.pt"
+  std_path: "/home/user/Projects/research/T2P/data/CSL-Daily/std.pt"
+  
+  # Sequence length settings
+  max_motion_length: 300
+  min_motion_length: 40
+  unit_length: 4
+  
+  # Window size for training (null = full sequence)
+  win_size: null
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  # Input: SOKE 133 dims (axis-angle rotations)
+  # body: 30 dims (10 joints * 3)
+  # lhand: 45 dims (15 joints * 3)
+  # rhand: 45 dims (15 joints * 3)
+  # jaw: 3 dims (1 joint * 3)
+  # expr: 10 dims
+  
+  # Transformer settings
+  embed_dim: 256
+  depth: 4
+  num_heads: 8
+  mlp_dim: 1024
+  dropout: 0.1
+  
+  # Q-Former settings
+  num_queries: 32
+  
+  # Codebook settings (single codebook)
+  codebook_size: 512
+  codebook_dim: 256
+  
+  # SPL settings
+  spl_hidden_dim: 256
+  spl_num_layers: 2
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  epochs: 500
+  batch_size: 64
+  num_workers: 8
+  seed: 42
+  
+  # Optimizer
+  learning_rate: 0.001
+  learning_rate_min: 0.000001
+  weight_decay: 0.01
+  
+  # Loss weights
+  lambda_recon: 1.0
+  lambda_velocity: 0.5
+  lambda_commit: 0.25
+  
+  # Checkpointing
+  model_dir: "checkpoints/spl_vqvae_v2_0.001"
+  save_every: 10
+  save_video_every: 10
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+evaluation:
+  batch_size: 64
+  num_workers: 4
+  use_smplx: false  # Set true if SMPL-X model is available
+
+# =============================================================================
+# SMPL-X Configuration (Optional, for joint coordinate metrics)
+# =============================================================================
+smplx:
+  model_path: "deps/smpl_models"
+  gender: "neutral"
